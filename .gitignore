@@ -13,3 +13,5 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+**/archive.tar
+**/*.pre-2[0-1][0-9][0-9]-[0-1][0-9]-[0-3][0-9]
