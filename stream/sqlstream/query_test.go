@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/skillian/expr"
 	"github.com/skillian/expr/errors"
 	"github.com/skillian/expr/stream"
@@ -14,6 +15,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+var logger = logging.GetLogger("expr/stream", logging.LoggerLevel(logging.VerboseLevel))
 
 type queryTest struct {
 	name string
@@ -24,7 +27,7 @@ var queryTests = []queryTest{
 	{
 		name: "helloWorld",
 		test: func(ctx context.Context, vs expr.Values, db *sqlstream.DB) error {
-			t := Todo{TodoID: 100, TodoName: "test #100"}
+			t := Todo{TodoName: "test #1"}
 			m, err := sqlstream.ModelOf(&t)
 			if err != nil {
 				return errors.Errorf1From(
@@ -32,6 +35,10 @@ var queryTests = []queryTest{
 						"%[1]v (type: %[1]T)", m)
 			}
 			db.Save(ctx, m)
+			if t.TodoID == 0 {
+				return errors.Errorf0(
+					"expected TodoID to be set")
+			}
 			todos, err := db.Query(ctx, m)
 			if err != nil {
 				return errors.Errorf1From(
@@ -40,7 +47,7 @@ var queryTests = []queryTest{
 			}
 			todos, err = stream.Filter(todos, expr.Eq{
 				expr.MemOf(todos.Var(), &t, &t.TodoID),
-				101,
+				int64(t.TodoID),
 			})
 			if err != nil {
 				return errors.Errorf1From(
@@ -48,62 +55,78 @@ var queryTests = []queryTest{
 					todos)
 			}
 			vs.Set(todos.Var(), m)
+			streamedTodos := make([]Todo, 0, 8)
 			if err = stream.Each(ctx, todos, func(s stream.Stream) error {
-				if t.TodoName != "testing 101" {
-					return errors.Errorf2("expected %q, not %q", "testing 101", t.TodoName)
-				}
+				logger.Verbose("got %v", spew.Sdump(t))
+				streamedTodos = append(streamedTodos, t)
 				return nil
 			}); err != nil {
 				return errors.Errorf1From(
 					err, "error attempting to stream %v",
 					todos)
 			}
+			if len(streamedTodos) != 1 {
+				return errors.Errorf2(
+					"expected %d, not %d",
+					1, len(streamedTodos))
+			}
+			if streamedTodos[0].TodoName != "test #1" {
+				return errors.Errorf2(
+					"expected %q, not %q",
+					"test #1", t.TodoName)
+			}
 			return nil
 		},
 	},
 	{
-		name: "join",
+		name: "join2",
 		test: func(ctx context.Context, vs expr.Values, db *sqlstream.DB) error {
-			err := db.Save(ctx,
-				&Todo{TodoID: 101, TodoName: "test 101"},
-				&Todo{TodoID: 102, TodoName: "test 102"},
-				&TodoDep{TodoID: 101, DepID: 102})
+			todos := [...]*Todo{
+				&Todo{TodoName: "test 101"},
+				&Todo{TodoName: "test 102"},
+			}
+			err := db.Save(ctx, todos[0], todos[1])
 			if err != nil {
 				return errors.Errorf0From(
-					err, "failed to save 2 Todos and a TodoDep")
+					err, "failed to save 2 Todos")
 			}
-			todo, todoDep, dep := &Todo{}, &TodoDep{}, &Todo{}
-			todoModel, todoDepModel, depModel := sqlstream.MustModelOf(todo), sqlstream.MustModelOf(todoDep), sqlstream.MustModelOf(dep)
-			todos, err := db.Query(ctx, todoModel)
+			todoDeps := [...]*TodoDep{
+				&TodoDep{TodoID: todos[0].TodoID, DepID: todos[1].TodoID},
+			}
+			err = db.Save(ctx, todoDeps[0])
+			if err != nil {
+				return errors.Errorf0From(
+					err, "failed to save a TodoDep")
+			}
+			todo, todoDep := &Todo{}, &TodoDep{}
+			todoModel, todoDepModel, err := sqlstream.ModelsOf2(todo, todoDep)
+			if err != nil {
+				return errors.Errorf0From(err, "failed to create models")
+			}
+			todoQ, err := db.Query(ctx, todoModel)
 			if err != nil {
 				return errors.Errorf0From(
 					err, "failed to create todo query")
 			}
-			deps, err := db.Query(ctx, depModel)
-			if err != nil {
-				return errors.Errorf0From(
-					err, "failed to create dependency query")
-			}
-			todoDeps, err := db.Query(ctx, todoDepModel)
+			todoDepQ, err := db.Query(ctx, todoDepModel)
 			if err != nil {
 				return errors.Errorf0From(
 					err, "failed to create joining query")
 			}
-			joinStream, joinVar := stream.LineOf(todoDeps).Join(
-				todos, expr.Eq{
-					expr.MemOf(todoDeps.Var(), todoDep, &todoDep.TodoID),
-					expr.MemOf(todos.Var(), todo, &todo.TodoID),
-				}, todos.Var())
-			joinStream, joinVar = joinStream.Join(
-				deps, expr.Eq{
-					expr.MemOf(joinVar, todoDep, &todoDep.DepID),
-					expr.MemOf(deps.Var(), dep, &dep.TodoID),
-				}, expr.Set{todos.Var(), deps.Var()})
-			vs.Set(todos.Var(), todo)
-			vs.Set(deps.Var(), dep)
-			var joined [][2]Todo
-			if err = stream.Each(ctx, joinStream, func(s stream.Stream) error {
-				joined = append(joined, [2]Todo{*todo, *dep})
+			s, err := stream.Join(todoDepQ, todoQ, expr.Eq{
+				expr.MemOf(todoDepQ.Var(), todoDep, &todoDep.DepID),
+				expr.MemOf(todoQ.Var(), todo, &todo.TodoID),
+			}, todoQ.Var())
+			if err != nil {
+				return errors.Errorf2From(
+					err, "failed to join %v to %v",
+					todoDeps, todos)
+			}
+			//logger.Verbose0(spew.Sdump(s))
+			vs.Set(s.Var(), todo)
+			var joined []Todo
+			if err = stream.Each(ctx, s, func(s stream.Stream) error {
+				joined = append(joined, *todo)
 				return nil
 			}); err != nil {
 				return errors.Errorf0From(
@@ -112,11 +135,8 @@ var queryTests = []queryTest{
 			if len(joined) != 1 {
 				return errors.Errorf1("expected 1, got %d", len(joined))
 			}
-			if joined[0][0].TodoID != 101 {
-				return errors.Errorf1("expected left to be todoID 101, not %d", joined[0][0].TodoID)
-			}
-			if joined[0][1].TodoID != 102 {
-				return errors.Errorf1("expected right to be todoID 102, not %d", joined[0][1].TodoID)
+			if joined[0].TodoID != 2 {
+				return errors.Errorf("expected todo ID 102, not %d", joined[0].TodoID)
 			}
 			return nil
 		},
@@ -124,10 +144,7 @@ var queryTests = []queryTest{
 }
 
 func TestQuery(t *testing.T) {
-	defer logging.TestingHandler(
-		logging.GetLogger(
-			"expr/stream",
-			logging.LoggerLevel(logging.VerboseLevel)), t,
+	defer logging.TestingHandler(logger, t,
 		logging.HandlerLevel(logging.VerboseLevel))()
 	vs := expr.NewValues()
 	ctx, _ := expr.AddValuesToContext(context.Background(), vs)
@@ -168,6 +185,10 @@ type Todo struct {
 	TodoName string
 }
 
+func (t *Todo) ID() sqlstream.Model {
+	return sqlstream.ModelField(t, (*int64)(&t.TodoID))
+}
+
 func (t *Todo) AppendValues(vs []interface{}) []interface{} {
 	return append(vs, int64(t.TodoID), t.TodoName)
 }
@@ -175,6 +196,12 @@ func (t *Todo) AppendValues(vs []interface{}) []interface{} {
 type TodoDep struct {
 	TodoID TodoID
 	DepID  TodoID
+}
+
+func (t *TodoDep) ID() sqlstream.Model {
+	return sqlstream.Compound(
+		sqlstream.ModelField(t, (*int64)(&t.TodoID)),
+		sqlstream.ModelField(t, (*int64)(&t.DepID)))
 }
 
 func (t *TodoDep) AppendValues(vs []interface{}) []interface{} {

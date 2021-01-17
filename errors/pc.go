@@ -6,14 +6,21 @@ import (
 	"strings"
 )
 
-// CallerName gets the name of the function calling CallerName.
-func CallerName(skip int) string {
+// callerRuntimeFunc gets the runtime.Func of the caller of the caller func.
+func callerRuntimeFunc(skip int) (f *runtime.Func, ok bool) {
 	pc, _, _, ok := runtime.Caller(skip + 1)
 	if !ok {
-		return ""
+		return nil, false
 	}
-	f := runtime.FuncForPC(pc)
-	if f == nil {
+	f = runtime.FuncForPC(pc)
+	return f, f != nil
+}
+
+// CallerName gets the name of the function calling CallerName.
+func CallerName(skip int) string {
+	f, ok := callerRuntimeFunc(skip + 1)
+	if !ok {
+		logger.Warn("%v", Errorf0("unknown caller"))
 		return ""
 	}
 	return f.Name()

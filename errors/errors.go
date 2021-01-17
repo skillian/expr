@@ -4,7 +4,11 @@ import (
 	goerrors "errors"
 	"fmt"
 	"strings"
+
+	"github.com/skillian/logging"
 )
+
+var logger = logging.GetLogger("expr/errors")
 
 // Aggregate zero or more possibly nil errors into one error
 func Aggregate(errs ...error) error {

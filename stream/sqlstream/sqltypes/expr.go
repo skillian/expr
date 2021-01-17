@@ -1,4 +1,4 @@
-package sqltype
+package sqltypes
 
 import (
 	"math/bits"
@@ -20,36 +20,8 @@ type Type interface{}
 // sqltype.Type.  This is a common representation meant to be specified in
 // struct field tags that can be parsed into RDBMS-specific types.
 func Parse(v string) (t Type, err error) {
-	t, err = doParse(v)
-	if err != nil {
-		return nil, err
-	}
-	nullable := false
-	primary := false
-	err = IterInners(t, func(t Type) error {
-		_, ok := t.(Nullable)
-		if ok {
-			nullable = true
-		}
-		_, ok = t.(Primary)
-		if ok {
-			primary = true
-		}
-		if nullable && primary {
-			return errors.Errorf0("primary keys cannot be nullable")
-		}
-		return nil
-	})
-	if err != nil {
-		t = nil
-	}
-	return
-}
-
-func doParse(v string) (t Type, err error) {
 	const (
 		nullablePrefix = "nullable("
-		primaryPrefix  = "primary("
 		intPrefix      = "int("
 		floatPrefix    = "float("
 		datePrefix     = "date("
@@ -64,18 +36,11 @@ func doParse(v string) (t Type, err error) {
 	if strings.HasSuffix(v, ")") {
 		v = v[:len(v)-len(")")]
 		if v, ok = removePrefix(v, nullablePrefix); ok {
-			inner, err := doParse(v)
+			inner, err := Parse(v)
 			if err != nil {
 				return nil, err
 			}
 			return Nullable{inner}, nil
-		}
-		if v, ok = removePrefix(v, primaryPrefix); ok {
-			inner, err := doParse(v)
-			if err != nil {
-				return nil, err
-			}
-			return Primary{inner}, nil
 		}
 		if v, ok = removePrefix(v, intPrefix); ok {
 			bits, err := strconv.Atoi(v)
@@ -190,27 +155,11 @@ func IsNullable(t Type) (ok bool) {
 	return
 }
 
-// Primary indicates that a
-type Primary [1]Type
-
-// IsPrimary checks if the type is a primary key type
-func IsPrimary(t Type) (ok bool) {
-	IterInners(t, func(t Type) error {
-		_, ok = t.(Primary)
-		return nil
-	})
-	return
-}
-
 // IterInners digs into the innermost type and then calls f on each type as it
 // returns back out.
 func IterInners(t Type, f func(t Type) error) error {
 	switch t := t.(type) {
 	case Nullable:
-		if err := IterInners(t[0], f); err != nil {
-			return err
-		}
-	case Primary:
 		if err := IterInners(t[0], f); err != nil {
 			return err
 		}

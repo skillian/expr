@@ -11,7 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/skillian/expr/errors"
-	"github.com/skillian/expr/stream/sqlstream/sqltype"
+	"github.com/skillian/expr/stream/sqlstream/sqltypes"
 )
 
 // Dialect tweaks how queries/statements are built depending on the RDBMS's
@@ -25,7 +25,7 @@ type Dialect interface {
 	Escape(id string) string
 
 	// DataTypeName generates the SQL name of the given datatype
-	DataTypeName(t sqltype.Type) (string, error)
+	DataTypeName(t sqltypes.Type) (string, error)
 
 	// tableExists checks if a table exists
 	tableExists(ctx context.Context, db *DB, t *table) (exists bool, err error)
@@ -75,14 +75,14 @@ var (
 	SQLite3 Dialect = sqlite3{}
 )
 
-// TimeTypeName pairs together a sqltype.TimeType and the name of the type that
+// TimeTypeName pairs together a sqltypes.TimeType and the name of the type that
 // matches that criteria.
 type TimeTypeName struct {
-	sqltype.TimeType
+	sqltypes.TimeType
 	Name string
 }
 
-func selectTimeTypeName(t sqltype.TimeType, ttns []TimeTypeName) (string, error) {
+func selectTimeTypeName(t sqltypes.TimeType, ttns []TimeTypeName) (string, error) {
 	for _, ttn := range ttns {
 		if (ttn.Min == time.Time{} || t.Min.After(ttn.Min) || t.Min.Equal(ttn.Min)) &&
 			(ttn.Max == time.Time{} || t.Max.Before(ttn.Max) || t.Max.Equal(ttn.Max)) &&
@@ -109,49 +109,46 @@ type mssql struct{ defaultDialect }
 func (mssql) DialectFlags() DialectFlags { return DialectTopInfix | DialectOutputInfix }
 
 var mssqlTimeTypes = []TimeTypeName{
-	{TimeType: sqltype.TimeType{
+	{TimeType: sqltypes.TimeType{
 		Min:  time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC),
 		Max:  time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC),
 		Prec: 24 * time.Hour,
 	}, Name: "date"},
-	{TimeType: sqltype.TimeType{
+	{TimeType: sqltypes.TimeType{
 		Min:  time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC),
 		Max:  time.Date(2079, 6, 6, 0, 0, 0, 0, time.UTC),
 		Prec: 1 * time.Minute,
 	}, Name: "smalldatetime"},
-	{TimeType: sqltype.TimeType{
+	{TimeType: sqltypes.TimeType{
 		Min:  time.Date(1753, 1, 1, 0, 0, 0, 0, time.UTC),
 		Max:  time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC),
 		Prec: 100 * time.Nanosecond,
 	}, Name: "datetime"},
-	{TimeType: sqltype.TimeType{
+	{TimeType: sqltypes.TimeType{
 		Min:  time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC),
 		Max:  time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC),
 		Prec: 100 * time.Nanosecond,
 	}, Name: "datetime2"},
 }
 
-func (mssql) DataTypeName(t sqltype.Type) (string, error) {
+func (mssql) DataTypeName(t sqltypes.Type) (string, error) {
 	sb := make([]string, 0, 8)
-	err := sqltype.IterInners(t, func(t sqltype.Type) error {
+	err := sqltypes.IterInners(t, func(t sqltypes.Type) error {
 		switch t := t.(type) {
-		case sqltype.Nullable:
+		case sqltypes.Nullable:
 			sb = append(sb[:len(sb)-1], " null")
 			return nil
-		case sqltype.Primary:
-			sb = append(sb, " primary key")
-			return nil
-		case sqltype.BoolType:
+		case sqltypes.BoolType:
 			sb = append(sb, "bit", " not null")
 			return nil
-		case sqltype.IntType:
+		case sqltypes.IntType:
 			if t.Bits <= 32 {
 				sb = append(sb, "int", " not null")
 				return nil
 			}
 			sb = append(sb, "bigint", " not null")
 			return nil
-		case sqltype.FloatType:
+		case sqltypes.FloatType:
 			if 0 < t.Mantissa && t.Mantissa <= 24 {
 				sb = append(sb, "float(24)", " not null")
 				return nil
@@ -163,7 +160,7 @@ func (mssql) DataTypeName(t sqltype.Type) (string, error) {
 			}
 			sb = append(sb, "float(53)", " not null")
 			return nil
-		case sqltype.DecimalType:
+		case sqltypes.DecimalType:
 			sb = append(sb,
 				"decimal(",
 				strconv.Itoa(t.Scale),
@@ -171,13 +168,13 @@ func (mssql) DataTypeName(t sqltype.Type) (string, error) {
 				strconv.Itoa(t.Prec),
 				")", " not null")
 			return nil
-		case sqltype.TimeType:
+		case sqltypes.TimeType:
 			s, err := selectTimeTypeName(t, mssqlTimeTypes)
 			if err != nil {
 				return err
 			}
 			sb = append(sb, s, " not null")
-		case sqltype.StringType:
+		case sqltypes.StringType:
 			if t.Var {
 				sb = append(sb, "var")
 			}
@@ -188,7 +185,7 @@ func (mssql) DataTypeName(t sqltype.Type) (string, error) {
 			}
 			sb = append(sb, length, ")", " not null")
 			return nil
-		case sqltype.BytesType:
+		case sqltypes.BytesType:
 			if t.Var {
 				sb = append(sb, "var")
 			}
@@ -220,52 +217,49 @@ type sqlite3 struct{ defaultDialect }
 func (sqlite3) DialectFlags() DialectFlags { return DialectLimitSuffix | DriverSupportsLastRowID }
 
 var sqlite3TimeTypeNames = []TimeTypeName{
-	{TimeType: sqltype.TimeType{
+	{TimeType: sqltypes.TimeType{
 		Min: func() time.Time { // Maybe this will work for BCE years?
 			t := time.Date(4714, 11, 24, 0, 0, 0, 0, time.UTC)
 			t.AddDate(-2*t.Year(), 0, 0)
 			return t
 		}(),
 	}, Name: "REAL"},
-	{TimeType: sqltype.TimeType{
+	{TimeType: sqltypes.TimeType{
 		Min:  time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
 		Prec: 1 * time.Second,
 	}, Name: "INTEGER"},
-	{TimeType: sqltype.TimeType{}, Name: "TEXT"},
+	{TimeType: sqltypes.TimeType{}, Name: "TEXT"},
 }
 
-func (sqlite3) DataTypeName(t sqltype.Type) (string, error) {
+func (sqlite3) DataTypeName(t sqltypes.Type) (string, error) {
 	sb := make([]string, 0, 4)
-	err := sqltype.IterInners(t, func(t sqltype.Type) error {
+	err := sqltypes.IterInners(t, func(t sqltypes.Type) error {
 		switch t := t.(type) {
-		case sqltype.Primary:
-			sb = append(sb, " PRIMARY KEY")
-			return nil
-		case sqltype.Nullable:
+		case sqltypes.Nullable:
 			sb = append(sb[:len(sb)-1], " NULL")
 			return nil
-		case sqltype.BoolType:
+		case sqltypes.BoolType:
 			sb = append(sb, "INTEGER", " NOT NULL")
 			return nil
-		case sqltype.IntType:
+		case sqltypes.IntType:
 			sb = append(sb, "INTEGER", " NOT NULL")
 			return nil
-		case sqltype.FloatType:
+		case sqltypes.FloatType:
 			sb = append(sb, "REAL", " NOT NULL")
 			return nil
-		case sqltype.DecimalType:
+		case sqltypes.DecimalType:
 			return errors.Errorf0("decimal type is not implemented")
-		case sqltype.TimeType:
+		case sqltypes.TimeType:
 			s, err := selectTimeTypeName(t, sqlite3TimeTypeNames)
 			if err != nil {
 				return err
 			}
 			sb = append(sb, s, " NOT NULL")
 			return nil
-		case sqltype.StringType:
+		case sqltypes.StringType:
 			sb = append(sb, "TEXT", " NOT NULL")
 			return nil
-		case sqltype.BytesType:
+		case sqltypes.BytesType:
 			sb = append(sb, "BLOB", " NOT NULL")
 			return nil
 		}

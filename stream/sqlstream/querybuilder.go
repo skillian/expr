@@ -69,6 +69,7 @@ func (qb *queryBuilder) sqlifyExpr(e expr.Expr) string {
 			stack = stack[:len(stack)-1]
 			var opstr string
 			var infix string
+			var omitParens bool
 			switch e := top.e.(type) {
 			case expr.Not:
 				opstr = "NOT " + top.opstrs[0]
@@ -97,9 +98,20 @@ func (qb *queryBuilder) sqlifyExpr(e expr.Expr) string {
 			case expr.Or:
 				infix = " OR "
 			case expr.Mem:
+				omitParens = true
 				infix = "."
+			case expr.Set:
+				omitParens = true
+				infix = ", "
 			case *query:
 				opstr = qb.getQueryVar(e)
+				if _, ok := sec.e.(expr.Mem); !ok {
+					omitParens = true
+					infix = ", "
+					for _, c := range e.from.columns {
+						top.opstrs = append(top.opstrs, opstr+"."+c.sqlName)
+					}
+				}
 			case expr.Var:
 				opstr = "?"
 				qb.sqlVars = append(qb.sqlVars, queryVar{e, qb.numArgs})
@@ -115,7 +127,7 @@ func (qb *queryBuilder) sqlifyExpr(e expr.Expr) string {
 			}
 			if infix != "" {
 				opstr = strings.Join(top.opstrs, infix)
-				if infix != "." {
+				if !omitParens {
 					opstr = strings.Join(
 						[]string{"(", ")"},
 						opstr)
@@ -140,17 +152,22 @@ func (qb *queryBuilder) buildSQL() string {
 		qb.append(") ")
 	}
 	qv := qb.getQueryVar(qb.q)
-	for i, c := range qb.q.from.columns {
-		if i > 0 {
-			qb.append(", ")
+	if len(qb.q.joins) == 0 {
+		for i, c := range qb.q.from.columns {
+			if i > 0 {
+				qb.append(", ")
+			}
+			qb.append(qv, ".")
+			qb.append(c.sqlName)
 		}
-		qb.append(qv, ".")
-		qb.append(c.sqlName)
+	} else {
+		j := qb.q.joins[len(qb.q.joins)-1]
+		qb.append(qb.sqlifyExpr(j.then))
 	}
 	qb.append(" FROM ", qb.q.from.sqlName, " ", qv)
 	for _, jq := range qb.q.joins {
-		qb.append(" INNER JOIN ", jq.from.sqlName, " ", qb.getQueryVar(jq), " ON ")
-		qb.append(qb.sqlifyExpr(jq.where), " ")
+		qb.append(" INNER JOIN ", jq.query.from.sqlName, " ", qb.getQueryVar(jq.query), " ON ")
+		qb.append(qb.sqlifyExpr(jq.when), " ")
 	}
 	if qb.q.where != nil {
 		qb.append(" WHERE ", qb.sqlifyExpr(qb.q.where))

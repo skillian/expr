@@ -4,12 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"io"
-	"math/bits"
-	"reflect"
 	"sync"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/skillian/expr"
 	"github.com/skillian/expr/errors"
+	"github.com/skillian/expr/internal"
 	"github.com/skillian/expr/stream"
 )
 
@@ -43,7 +43,7 @@ type query struct {
 	from *table
 	//to      Model
 	where   expr.Expr
-	joins   []*query
+	joins   []queryJoin
 	sqlOnce sync.Once
 	sqlFunc func()
 	sqlStr  string
@@ -59,6 +59,12 @@ type queryArg struct {
 type queryVar struct {
 	v expr.Var
 	i int
+}
+
+type queryJoin struct {
+	*query
+	when expr.Expr
+	then expr.Expr
 }
 
 func (q *query) initSQLFunc() {
@@ -79,9 +85,9 @@ func (q *query) clone() *query {
 		dbcmd:   q.dbcmd,
 		from:    q.from,
 		where:   q.where,
-		joins:   append(make([]*query, 0, 1<<bits.Len(uint(len(q.joins)))), q.joins...),
-		sqlArgs: append(make([]queryArg, 0, 1<<bits.Len(uint(len(q.sqlArgs)))), q.sqlArgs...),
-		sqlVars: append(make([]queryVar, 0, 1<<bits.Len(uint(len(q.sqlVars)))), q.sqlVars...),
+		joins:   append(make([]queryJoin, 0, internal.CapForLen(len(q.joins))), q.joins...),
+		sqlArgs: append(make([]queryArg, 0, internal.CapForLen(len(q.sqlArgs))), q.sqlArgs...),
+		sqlVars: append(make([]queryVar, 0, internal.CapForLen(len(q.sqlVars))), q.sqlVars...),
 	}
 	q2.initSQLFunc()
 	return q2
@@ -123,6 +129,23 @@ func (q *query) Filter(e expr.Expr) (stream.Streamer, error) {
 	}
 	q2 := q.clone()
 	q2.where = e
+	return q2, nil
+}
+
+func (q *query) Join(other stream.Streamer, when, then expr.Expr, options ...stream.JoinOption) (stream.Streamer, error) {
+	oq, ok := other.(*query)
+	if !ok || q.checkVars(when, "join") || q.checkVars(then, "join") {
+		return stream.NewLocalJoiner(q, other, when, then)
+	}
+	q2 := q.clone()
+	if oq.where != nil {
+		if q2.where != nil {
+			q2.where = oq.where
+		}
+		q2.where = expr.And{q2.where, oq.where}
+	}
+	q2.joins = append(q2.joins, queryJoin{query: oq, when: when, then: then})
+	q2.joins = append(q2.joins, oq.joins...)
 	return q2, nil
 }
 
@@ -172,11 +195,18 @@ func (qr *queryRows) Next(ctx context.Context) error {
 	if !qr.rows.Next() {
 		return io.EOF
 	}
-	if m, ok := vs.Get(qr.Var()).(Model); !ok {
-		m = reflect.New(qr.q.from.goType).Interface().(Model)
-		vs.Set(qr.Var(), m)
-		qr.fields = m.AppendFields(qr.fields[:0])
+	v := vs.Get(qr.Var())
+	if v == nil {
+		return errors.Errorf(
+			"Query results require a model to scan into")
 	}
+	m, err := ModelOf(v)
+	if err != nil {
+		return errors.Errorf1From(
+			err, "cannot scan into %v", v)
+	}
+	qr.fields = m.AppendFields(qr.fields[:0])
+	logger.Verbose1("scanning into %v", spew.Sdump(qr.fields))
 	return qr.rows.Scan(qr.fields...)
 }
 

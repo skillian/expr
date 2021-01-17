@@ -9,8 +9,10 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/davecgh/go-spew/spew"
+
 	"github.com/skillian/expr/errors"
-	"github.com/skillian/expr/stream/sqlstream/sqltype"
+	"github.com/skillian/expr/stream/sqlstream/sqltypes"
 	"github.com/skillian/logging"
 )
 
@@ -18,7 +20,7 @@ var (
 	logger = logging.GetLogger("expr/stream/sqlstream")
 )
 
-// DB is a SQL database
+// DB wraps a *sql.DB and adds ORM functionality on top.
 type DB struct {
 	mu          sync.Mutex
 	DB          *sql.DB
@@ -81,12 +83,22 @@ func (db *DB) CreateCollection(ctx context.Context, v interface{}) error {
 	if err != nil {
 		return errors.Errorf1From(err, "failed to create model for %v", v)
 	}
-	names := m.AppendNames(db.getstrings())
-	var idNames []string
-	if idm, ok := m.(IDModeler); ok {
-		idNames = idm.ID().AppendNames(db.getstrings())
+	var fields []interface{}
+	var idFields []interface{}
+	var isID map[interface{}]struct{}
+	var idSQLNames []string
+	if idm, ok := db.IDOf(m); ok {
+		fields = m.AppendFields(db.getifaces())
+		idFields = idm.AppendFields(db.getifaces())
+		logger.Verbose2("fields: %#v, idFields:%#v", fields, idFields)
+		isID = make(map[interface{}]struct{}, len(idFields))
+		for _, f := range idFields {
+			isID[f] = struct{}{}
+		}
+		idSQLNames = db.getstrings()
+		defer db.putifaces(fields, idFields)
+		defer db.putstrings(idSQLNames)
 	}
-	defer db.putstrings(names, idNames)
 	t := db.getTable(v, m)
 	sb := strings.Builder{}
 	ws := sb.WriteString
@@ -100,6 +112,22 @@ func (db *DB) CreateCollection(ctx context.Context, v interface{}) error {
 		ws(c.sqlName)
 		ws(" ")
 		ws(c.sqlTypeName)
+		if len(idFields) > 0 {
+			if _, ok := isID[fields[i]]; ok {
+				idSQLNames = append(idSQLNames, c.sqlName)
+			}
+		}
+	}
+	if len(idSQLNames) > 0 {
+		ws(", CONSTRAINT ")
+		ws(db.dialect.Escape("PK_" + t.rawName))
+		ws(" PRIMARY KEY (")
+		ws(idSQLNames[0])
+		for _, sn := range idSQLNames[1:] {
+			ws(", ")
+			ws(sn)
+		}
+		ws(")")
 	}
 	ws(" );")
 	sqlStr := sb.String()
@@ -164,8 +192,8 @@ var qmarkAndCommas = strings.Repeat("?, ", 256)
 
 // Save some records.  The records do not have to be the same type.
 func (db *DB) Save(ctx context.Context, vs ...interface{}) error {
-	ids, vs := db.getifaces(), db.getifaces()
-	defer db.putifaces(vs, ids)
+	ids, ws := db.getifaces(), db.getifaces()
+	defer db.putifaces(ws, ids)
 	for _, v := range vs {
 		m, err := ModelOf(v)
 		if err != nil {
@@ -175,23 +203,52 @@ func (db *DB) Save(ctx context.Context, vs ...interface{}) error {
 		}
 		t := db.getTable(v, m)
 		idm, ok := db.IDOf(m)
-		if !ok {
-			_, err = t.insert(ctx, db, m)
-		} else if err == nil {
+		if ok {
 			ids = idm.AppendValues(ids[:0])
-			if valuesAreZero(ids) {
-				_, err = t.insert(ctx, db, m)
-			} else {
-				vs = append(m.AppendValues(vs[:0]), ids...)
-				if _, err = db.DB.ExecContext(ctx, t.sqlUpdate, vs...); err != nil {
+			logger.Verbose2(
+				"current ID values of %v: %v",
+				m, spew.Sdump(ids))
+			if !valuesAreZero(ids) {
+				logger.Verbose1("one or more non-zero ID "+
+					"values.  Updating %v...", m)
+				ws = append(m.AppendValues(ws[:0]), ids...)
+				res, err := db.DB.ExecContext(
+					ctx, t.sqlUpdate, ws...)
+				if err != nil {
 					return errors.Errorf2From(
-						err, "failed to update model with SQL:\n\n%s\n\nArgs:\n\n%v",
-						t.sqlUpdate, vs)
+						err, "failed to update model "+
+							"with SQL:\n\n%s\n\n"+
+							"Args:\n\n%v",
+						t.sqlUpdate, ws)
 				}
+				n, err := res.RowsAffected()
+				if err != nil {
+					return errors.Errorf2From(
+						err, "failed to determine the "+
+							"number of rows "+
+							"updated by\n\t%s\n\n"+
+							"Args:\n\t%v",
+						t.sqlUpdate, ws)
+				}
+				if n > 1 {
+					return errors.Errorf2(
+						"SQL:\n\t%v\n\nArgs:\n\t%v "+
+							"updated %d rows, not "+
+							"%d",
+						n, 1)
+				}
+				if n == 1 {
+					continue
+				}
+				logger.Verbose0(
+					"No rows updated.  Attempting " +
+						"insert...")
 			}
 		}
+		_, err = t.insert(ctx, db, m)
 		if err != nil {
-			return err
+			return errors.Errorf2From(
+				err, "error while inserting %v into %v", m, db)
 		}
 	}
 	return nil
@@ -280,13 +337,17 @@ func (db *DB) putstringsUnsafe(strss ...[]string) {
 }
 
 type table struct {
-	sqlName    string
 	sqlInsert  string
 	insertFunc func(t *table, ctx context.Context, db *DB, m Model) (ids Model, err error)
 	sqlUpdate  string
-	columns    []column
-	rawName    string
-	goType     reflect.Type
+	// idColNum is the column number (index + 1) of the ID column in the
+	// table.  It's used to calculate which field to skip on inserts
+	// into tables with auto-incrementing IDs.
+	idColNum int
+	columns  []column
+	sqlName  string
+	rawName  string
+	goType   reflect.Type
 }
 
 func (db *DB) getTable(v interface{}, m Model) *table {
@@ -296,11 +357,14 @@ func (db *DB) getTable(v interface{}, m Model) *table {
 }
 
 func (db *DB) getTableUnsafe(v interface{}, m Model) *table {
+	if ir, ok := v.(interface{ Interface() interface{} }); ok {
+		v = ir.Interface()
+	}
 	tp := reflect.TypeOf(v)
 	t, ok := db.tables[tp]
 	if !ok {
 		t = &table{
-			goType: tp,
+			goType: tp.Elem(),
 		}
 		db.tables[tp] = t
 		t.init(db, m, tp)
@@ -326,7 +390,7 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 		tp, t.rawName, t.sqlName)
 	fields := m.AppendFields(db.getifacesUnsafe())
 	names := m.AppendNames(make([]string, 0, len(fields)))
-	sqlTypes := m.AppendSQLTypes(make([]sqltype.Type, 0, len(fields)))
+	sqlTypes := m.AppendSQLTypes(make([]sqltypes.Type, 0, len(fields)))
 	fieldNameToSQLName := make(map[string]string, len(names))
 	t.columns = make([]column, len(fields))
 	for i := range fields {
@@ -360,19 +424,22 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 	}
 	sb := db.getstringsUnsafe()
 	defer db.putstringsUnsafe(idNames, sb)
+	defer cleanstrings(idNames, sb)
 	sb = append(sb, "INSERT INTO ", t.sqlName, " ( ")
-	var i int
-	for _, n := range names {
-		if _, ok := idSet[n]; ok {
+	var nameIndexSkipID int
+	for i, n := range names {
+		// only omit single primary keys.  Composites are not ignored.
+		if _, ok := idSet[n]; ok && len(idSet) == 1 {
+			t.idColNum = i + 1
 			continue
 		}
-		if i > 0 {
+		if nameIndexSkipID > 0 {
 			sb = append(sb, ", ")
 		}
-		i++
+		nameIndexSkipID++
 		sb = append(sb, fieldNameToSQLName[n])
 	}
-	sb = append(sb, ") ")
+	sb = append(sb, " ) ")
 	if len(idNames) > 0 && db.dialect.DialectFlags().HasAll(DialectOutputInfix) {
 		sb = append(sb, "OUTPUT ")
 		for i, name := range idNames {
@@ -385,7 +452,12 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 		t.insertFunc = (*table).insertQuery
 	}
 	logger.Verbose3("%v names: %v, idNames: %v", m, names, idNames)
-	sb = append(sb, "VALUES ( ", qmarkAndCommas[:(len(names)-len(idNames))*3-2], " )")
+	// composite keys don't get excluded from insertion values
+	delta := 0
+	if len(idNames) == 1 {
+		delta++
+	}
+	sb = append(sb, "VALUES ( ", qmarkAndCommas[:(len(names)-delta)*3-2], " )")
 	if len(idNames) > 0 && db.dialect.DialectFlags().HasAll(DialectReturningSuffix) {
 		sb = append(sb, "RETURNING ")
 		for i, name := range idNames {
@@ -404,22 +476,22 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 	}
 	sb = sb[:0]
 	if len(idNames) > 0 {
+		nameIndexSkipID = 0
 		sb = append(sb, "UPDATE ", t.sqlName, " SET ")
-		i = 0
 		for _, n := range names {
-			if _, ok := idSet[n]; ok {
+			if _, ok := idSet[n]; ok && len(idNames) == 1 {
 				continue
 			}
-			if i > 0 {
+			if nameIndexSkipID > 0 {
 				sb = append(sb, ", ")
 			}
-			i++
+			nameIndexSkipID++
 			sb = append(sb, fieldNameToSQLName[n], " = ?")
 		}
 		sb = append(sb, " WHERE ")
 		for i, n := range idNames {
 			if i > 0 {
-				sb = append(sb, ", ")
+				sb = append(sb, " AND ")
 			}
 			sb = append(sb, fieldNameToSQLName[n], " = ?")
 		}
@@ -430,7 +502,12 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 }
 
 func (t *table) insert(ctx context.Context, db *DB, m Model) (Model, error) {
-	return t.insertFunc(t, ctx, db, m)
+	logger.Verbose2("inserting %v into %v...", spew.Sdump(m), db)
+	ids, err := t.insertFunc(t, ctx, db, m)
+	logger.Verbose4(
+		"result of inserting %v into %v: (%v, %v)",
+		spew.Sdump(m), db, spew.Sdump(ids), err)
+	return ids, err
 }
 
 var errCannotDetermineID = errors.New("cannot determine ID")
@@ -450,36 +527,54 @@ func (t *table) insertQuery(ctx context.Context, db *DB, m Model) (ids Model, er
 	if !ok {
 		return nil, errCannotDetermineID
 	}
+	logger.Verbose2("inserting %v with SQL:\n\t%v", m, t.sqlInsert)
 	err = db.DB.QueryRowContext(ctx, t.sqlInsert, m.AppendValues(nil)...).Scan(ids.AppendFields(nil))
+	logger.Verbose1("insert result: %v", m)
 	return
 }
 
 // insertLastInsertID obtains the inserted result from res.LastInsertId
 func (t *table) insertLastInsertID(ctx context.Context, db *DB, m Model) (ids Model, err error) {
 	defer deferredInsertError(&err, m)
+	vs := db.getifaces()
+	defer db.putifaces(vs)
 	ids, ok := db.IDOf(m)
 	if !ok {
 		return nil, errCannotDetermineID
 	}
-	v := ids.AppendFields(nil)[0]
+	vs = ids.AppendFields(vs[:0])
+	v := vs[0]
 	pi64, ok := v.(*int64)
 	if !ok {
 		return nil, errors.Errorf(
 			"cannot use %v with non-int64 ID: %T",
 			errors.CallerName(0), v)
 	}
-	args := m.AppendValues(nil)
-	res, err := db.DB.ExecContext(ctx, t.sqlInsert, args...)
+	vs = m.AppendValues(vs[:0])
+	switch t.idColNum {
+	case 0:
+		//pass
+	case 1:
+		vs = vs[1:]
+	default:
+		copy(vs[t.idColNum-1:], vs[t.idColNum:])
+		vs = vs[:len(vs)-1]
+	}
+	logger.Verbose3(
+		"inserting %v with SQL:\n\t%v\n\nArgs:\n\t%v",
+		m, t.sqlInsert, vs)
+	res, err := db.DB.ExecContext(ctx, t.sqlInsert, vs...)
 	if err != nil {
 		return nil, errors.Errorf2From(
 			err, "error while executing SQL:\n\n%s\n\nArgs:\n\n%v",
-			t.sqlInsert, args)
+			t.sqlInsert, vs)
 	}
 	*pi64, err = res.LastInsertId()
 	if err != nil {
 		return nil, errors.Errorf0From(
 			err, "failed to get last insert ID")
 	}
+	logger.Verbose1("inserted: %v", m)
 	return ids, err
 }
 
@@ -491,7 +586,7 @@ type column struct {
 	// on the Dialect of the DB that owns this column's table.
 	sqlTypeName string
 
-	sqlType sqltype.Type
+	sqlType sqltypes.Type
 
 	// rawName holds the un-escaped name of the column.
 	rawName string
@@ -501,6 +596,7 @@ type column struct {
 	sqlConvType reflect.Type
 }
 
+/*
 // GoSQLDataTypeKind maps Go types to SQL kinds of data.
 //
 // Go database/sql drivers don't have to handle every type, just
@@ -539,10 +635,9 @@ const (
 // GoSQLDataTypeKindFuncs types.  The meaning of its parameters changes
 // depending on which GoSQLDataTypeKind the func is for.
 type GoSQLDataTypeKindFunc func(length, prec int64) string
-
+*/
 // sqlDriverValueTypes maps GoSQLDataTypeKinds to their Go types.
-var sqlDriverValueTypes = [int(numGoSQLDataTypeKinds)]reflect.Type{
-	nil,
+var sqlDriverValueTypes = [...]reflect.Type{
 	reflect.TypeOf(false),
 	reflect.TypeOf(int64(0)),
 	reflect.TypeOf(float64(0)),
@@ -555,17 +650,17 @@ var sqlDriverValueTypes = [int(numGoSQLDataTypeKinds)]reflect.Type{
 }
 
 func getConvertType(from reflect.Type) (to reflect.Type) {
-	for _, t := range sqlDriverValueTypes[1:] {
+	for _, t := range sqlDriverValueTypes {
 		if t == from {
 			return t
 		}
 	}
-	for _, t := range sqlDriverValueTypes[1:] {
+	for _, t := range sqlDriverValueTypes {
 		if from.AssignableTo(t) && t.AssignableTo(from) {
 			return t
 		}
 	}
-	for _, t := range sqlDriverValueTypes[1:] {
+	for _, t := range sqlDriverValueTypes {
 		if from.ConvertibleTo(t) && t.ConvertibleTo(from) {
 			return t
 		}

@@ -6,7 +6,8 @@ import (
 	"sync"
 
 	"github.com/skillian/expr/errors"
-	"github.com/skillian/expr/stream/sqlstream/sqltype"
+	"github.com/skillian/expr/internal"
+	"github.com/skillian/expr/stream/sqlstream/sqltypes"
 )
 
 type fieldsAppender interface {
@@ -47,11 +48,11 @@ func (va valuesAppenderFunc) AppendValues(vs []interface{}) []interface{} {
 
 type sqlTypesAppender interface {
 	// AppendSQLTypes appends the SQL types for the model's fields.
-	AppendSQLTypes(ts []sqltype.Type) []sqltype.Type
+	AppendSQLTypes(ts []sqltypes.Type) []sqltypes.Type
 }
 
-// Model describes data that can be queried as rows from a relational
-// database.
+// Model describes data returned as rows from a query, but not
+// necessarily from a single table.
 type Model interface {
 	fieldsAppender
 	namesAppender
@@ -60,7 +61,8 @@ type Model interface {
 }
 
 // IDModeler returns a Model implementation that describes its unique
-// ID.
+// ID.  The ID model must be a subset of the Model itself and its fields must
+// occur in the same order as its owning Model's fields.
 type IDModeler interface {
 	ID() Model
 }
@@ -129,6 +131,20 @@ func Compound(ms ...Model) CompoundModel {
 	return cm
 }
 
+// CompoundOf converts its operands to Models
+func CompoundOf(vs ...interface{}) (cm CompoundModel, err error) {
+	cm = make(CompoundModel, len(vs))
+	for i, v := range vs {
+		if cm[i], err = ModelOf(v); err != nil {
+			return nil, errors.Errorf2From(
+				err, "failed to create model from parameter "+
+					"%d: %v",
+				i, v)
+		}
+	}
+	return
+}
+
 // AppendFields appends the fields of all the inner models to fs.
 func (c CompoundModel) AppendFields(fs []interface{}) []interface{} {
 	for _, m := range c {
@@ -154,7 +170,7 @@ func (c CompoundModel) AppendValues(vs []interface{}) []interface{} {
 }
 
 // AppendSQLTypes appends the SQL types of all the inner models to ts.
-func (c CompoundModel) AppendSQLTypes(ts []sqltype.Type) []sqltype.Type {
+func (c CompoundModel) AppendSQLTypes(ts []sqltypes.Type) []sqltypes.Type {
 	for _, m := range c {
 		ts = m.AppendSQLTypes(ts)
 	}
@@ -206,7 +222,11 @@ func ModelOf(v interface{}) (Model, error) {
 	if !ok {
 		fields := make([]interface{}, len(rmt.fields))
 		for i, f := range rmt.fields {
-			fields[i] = rv.FieldByIndex(f.Index).Addr().Interface()
+			fv := rv.FieldByIndex(f.Index)
+			ft := fv.Type()
+			ct := reflect.PtrTo(getConvertType(ft))
+			fp := fv.Addr()
+			fields[i] = fp.Convert(ct).Interface()
 		}
 		fa = fieldsAppenderFunc(func(fs []interface{}) []interface{} {
 			return append(fs, fields...)
@@ -220,6 +240,24 @@ func ModelOf(v interface{}) (Model, error) {
 	return m, nil
 }
 
+// ModelsOf2 calls ModelOf on each parameter and returns their models in order.
+func ModelsOf2(v0, v1 interface{}) (m0, m1 Model, err error) {
+	if m0, err = ModelOf(v0); err != nil {
+		return
+	}
+	m1, err = ModelOf(v1)
+	return
+}
+
+// ModelsOf3 calls ModelOf on each parameter and returns their models in order.
+func ModelsOf3(v0, v1, v2 interface{}) (m0, m1, m2 Model, err error) {
+	if m0, m1, err = ModelsOf2(v0, v1); err != nil {
+		return
+	}
+	m2, err = ModelOf(v2)
+	return
+}
+
 // MustModelOf must succeed in creating a model from a value or else it will
 // panic.
 func MustModelOf(v interface{}) Model {
@@ -228,6 +266,53 @@ func MustModelOf(v interface{}) Model {
 		panic(err)
 	}
 	return m
+}
+
+var modelFieldDefs sync.Map
+
+// ModelField creates a model from the given field.  It's useful for defining
+// a struct's ID model.
+func ModelField(struc, field interface{}) Model {
+	s := internal.IfaceOf(struc)
+	f := internal.IfaceOf(field)
+	type key struct {
+		structType internal.IfaceType
+		offset     uintptr
+	}
+	type value struct {
+		sf reflect.StructField
+	}
+	k := key{s.Type(), f.Uintptr() - s.Uintptr()}
+	var ki interface{} = k
+	var v *value
+	x, loaded := modelFieldDefs.Load(ki)
+	if !loaded {
+		rt := reflect.TypeOf(struc).Elem()
+		nf := rt.NumField()
+		for i := 0; i < nf; i++ {
+			sf := rt.Field(i)
+			if sf.Offset == k.offset {
+				v = &value{sf: sf}
+				break
+			}
+		}
+		if v == nil {
+			panic(errors.Errorf2(
+				"failed to find %[1]p in %[2]p (type: %[2]T)",
+				field, struc))
+		}
+		x, loaded = modelFieldDefs.LoadOrStore(ki, v)
+	}
+	if loaded {
+		v = x.(*value)
+	}
+	switch f := field.(type) {
+	case *int64:
+		return Int64Model{ID: f, Name: v.sf.Name}
+	}
+	panic(errors.Errorf2(
+		"cannot create Model from field %[1]p of %[2]p (type: %[2]T)",
+		field, struc))
 }
 
 func (m reflectModel) AppendFields(fs []interface{}) []interface{} {
@@ -248,7 +333,7 @@ func (m reflectModel) AppendValues(vs []interface{}) []interface{} {
 	return m.rmt.va.bind(&m).AppendValues(vs)
 }
 
-func (m reflectModel) AppendSQLTypes(ts []sqltype.Type) []sqltype.Type {
+func (m reflectModel) AppendSQLTypes(ts []sqltypes.Type) []sqltypes.Type {
 	if m.rmt.ta == nil {
 		return m.self.(sqlTypesAppender).AppendSQLTypes(ts)
 	}
@@ -335,11 +420,46 @@ func newReflectModelType(v interface{}, rt reflect.Type) *reflectModelType {
 		})
 	}
 	if _, ok := v.(sqlTypesAppender); !ok {
-		sqltypes := make([]sqltype.Type, len(rmt.fields))
+		var idFields []interface{}
+		var idNames []string
+		var idTypes []sqltypes.Type
+		if idm, ok := v.(IDModeler); ok {
+			ids := idm.ID()
+			idFields = ids.AppendFields(idFields)
+			idNames = ids.AppendNames(idNames)
+			idTypes = ids.AppendSQLTypes(idTypes)
+			logger.Verbose3(
+				"%[1]v (type: %[1]T) idFields: %[2]v, "+
+					"idTypes: %[3]v",
+				v, idFields, idTypes)
+		}
+		sqlTypes := make([]sqltypes.Type, len(rmt.fields))
+		rv := reflect.ValueOf(v).Elem()
 		for i, f := range rmt.fields {
 			sf := rt.FieldByIndex(f.Index)
+			st := &sqlTypes[i]
+			id := -1
+			{
+				fp := rv.FieldByIndex(sf.Index).Addr().Pointer()
+				for i, idf := range idFields {
+					eq := fp == reflect.ValueOf(idf).Pointer() &&
+						sf.Name == idNames[i]
+					logger.Verbose2("%v is ID: %v", sf, eq)
+					if eq {
+						id = i
+						break
+					}
+				}
+			}
+			if id != -1 {
+				*st = idTypes[id]
+				logger.Verbose1(
+					"Determined that %[1]v (type: %[1]T) "+
+						"is ID via IDModeler", *st)
+				continue
+			}
 			if tag, ok := sf.Tag.Lookup("sqlstreamtype"); ok {
-				st, err := sqltype.Parse(tag)
+				sqlt, err := sqltypes.Parse(tag)
 				if err != nil {
 					panic(errors.Errorf2From(
 						err, "failed to parse SQL "+
@@ -347,39 +467,32 @@ func newReflectModelType(v interface{}, rt reflect.Type) *reflectModelType {
 							"field %q of type %q",
 						sf.Name, rt))
 				}
-				sqltypes[i] = st
+				*st = sqlt
 				continue
 			}
-			primary := false
 			switch sf.Type.Kind() {
 			case reflect.Bool:
-				sqltypes[i] = sqltype.Bool
+				*st = sqltypes.Bool
 			case reflect.Int, reflect.Int64:
-				sqltypes[i] = sqltype.Int64
-				primary = i == 0
+				*st = sqltypes.Int64
 			case reflect.Int32:
-				sqltypes[i] = sqltype.IntType{Bits: 32}
-				primary = i == 0
+				*st = sqltypes.IntType{Bits: 32}
 			case reflect.Int16:
-				sqltypes[i] = sqltype.IntType{Bits: 16}
-				primary = i == 0
+				*st = sqltypes.IntType{Bits: 16}
 			case reflect.Int8:
-				sqltypes[i] = sqltype.IntType{Bits: 8}
+				*st = sqltypes.IntType{Bits: 8}
 			case reflect.Float32:
-				sqltypes[i] = sqltype.FloatType{Mantissa: 24}
+				*st = sqltypes.FloatType{Mantissa: 24}
 			case reflect.Float64:
-				sqltypes[i] = sqltype.FloatType{Mantissa: 53}
+				*st = sqltypes.FloatType{Mantissa: 53}
 			case reflect.String:
-				sqltypes[i] = sqltype.StringType{Var: true}
-				primary = i == 0
+				*st = sqltypes.StringType{Var: true}
 			default:
 				switch {
 				case sf.Type.AssignableTo(typeOfSQLDecimal):
-					sqltypes[i] = sqltype.DecimalType{}
-					primary = i == 0
+					*st = sqltypes.DecimalType{}
 				case sf.Type.AssignableTo(typeOfByteSlice):
-					sqltypes[i] = sqltype.BytesType{Var: true}
-					primary = i == 0
+					*st = sqltypes.BytesType{Var: true}
 				default:
 					panic(errors.Errorf2(
 						"cannot determine the SQL "+
@@ -388,14 +501,11 @@ func newReflectModelType(v interface{}, rt reflect.Type) *reflectModelType {
 						sf.Name, rt))
 				}
 			}
-			if primary {
-				sqltypes[i] = sqltype.Primary{sqltypes[i]}
-			}
 		}
 		// TODO: Nothing here benefits from being "unbound"
 		// Maybe it was a premature optimization?
-		rmt.ta = reflectModelUnboundSQLTypesAppenderFunc(func(m *reflectModel, ts []sqltype.Type) []sqltype.Type {
-			return append(ts, sqltypes...)
+		rmt.ta = reflectModelUnboundSQLTypesAppenderFunc(func(m *reflectModel, ts []sqltypes.Type) []sqltypes.Type {
+			return append(ts, sqlTypes...)
 		})
 	}
 	return rmt
@@ -446,7 +556,7 @@ func (na reflectModelBoundNamesAppender) AppendNames(ns []string) []string {
 	return na.f(na.m, ns)
 }
 
-type reflectModelUnboundSQLTypesAppenderFunc func(m *reflectModel, ts []sqltype.Type) []sqltype.Type
+type reflectModelUnboundSQLTypesAppenderFunc func(m *reflectModel, ts []sqltypes.Type) []sqltypes.Type
 
 func (f reflectModelUnboundSQLTypesAppenderFunc) bind(m *reflectModel) reflectModelBoundSQLTypesAppenderFunc {
 	return reflectModelBoundSQLTypesAppenderFunc{m: m, f: f}
@@ -457,7 +567,7 @@ type reflectModelBoundSQLTypesAppenderFunc struct {
 	f reflectModelUnboundSQLTypesAppenderFunc
 }
 
-func (ta reflectModelBoundSQLTypesAppenderFunc) AppendSQLTypes(ts []sqltype.Type) []sqltype.Type {
+func (ta reflectModelBoundSQLTypesAppenderFunc) AppendSQLTypes(ts []sqltypes.Type) []sqltypes.Type {
 	return ta.f(ta.m, ts)
 }
 
@@ -482,9 +592,9 @@ func (m Int64Model) AppendNames(ns []string) []string { return append(ns, m.Name
 // AppendFields appends the address of the ID to the fields
 func (m Int64Model) AppendFields(fs []interface{}) []interface{} { return append(fs, m.ID) }
 
-// AppendSQLTypes appends sqltype.Int64 to ts
-func (m Int64Model) AppendSQLTypes(ts []sqltype.Type) []sqltype.Type {
-	return append(ts, sqltype.Int64)
+// AppendSQLTypes appends sqltypes.Int64 to ts
+func (m Int64Model) AppendSQLTypes(ts []sqltypes.Type) []sqltypes.Type {
+	return append(ts, sqltypes.Int64)
 }
 
 type nopID struct {
@@ -503,6 +613,6 @@ func (m nopID) AppendValues(vs []interface{}) []interface{} {
 	return m.m.AppendFields(vs)
 }
 
-func (m nopID) AppendSQLTypes(vs []sqltype.Type) []sqltype.Type {
+func (m nopID) AppendSQLTypes(vs []sqltypes.Type) []sqltypes.Type {
 	return m.m.AppendSQLTypes(vs)
 }
