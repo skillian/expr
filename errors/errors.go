@@ -27,9 +27,14 @@ func Aggregate(errs ...error) error {
 	return errors(errs)
 }
 
-// Any returns true if any errors contained in
+// Any returns true if f evaluates any of the errors contained in err to true.
 func Any(err error, f func(e error) bool) bool {
 	return First(err, f) != nil
+}
+
+// Catch an error.  This function is expected to be called from a defer.
+func Catch(p *error, f func() error) {
+	*p = Aggregate(*p, f())
 }
 
 // First gets the first error that f(error) returns true.

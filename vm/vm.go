@@ -13,6 +13,17 @@ import (
 
 // VM is a virtual machine that can execute bytecode-compiled functions
 type VM struct {
+	// reg holds the virtual registers of the VM.
+	//
+	// TODO: This might have to move to the frame after proper function
+	// call support is added.
+	reg struct {
+		a0, a1 interface{}
+		i0, i1 int
+		s0, s1 string
+		b0, b1 bool
+		i64    [2]int64
+	}
 	stack Stack
 }
 
@@ -81,6 +92,7 @@ var (
 )
 
 func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error) {
+	var ok bool
 	fi := len(vm.stack.frames) - 1
 	for pc := 0; pc < len(f.opCodes); pc++ {
 		frame := vm.stack.frame(fi)
@@ -91,32 +103,29 @@ func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error)
 		case Nop:
 			continue
 		case Not:
-			b, ok := frame.popBool()
-			if !ok {
+			if vm.reg.b0, ok = frame.popBool(); !ok {
 				return vm.errStackUnderflow()
 			}
-			frame.pushBool(!b)
+			frame.pushBool(!vm.reg.b0)
 			continue
 		}
 		if i.isBinary() {
 			switch t {
 			case Any:
-				right, ok := frame.popAny()
-				if !ok {
+				if vm.reg.a1, ok = frame.popAny(); !ok {
 					return vm.errStackUnderflow()
 				}
-				var left interface{}
 				switch OpType(a) {
 				case Any:
-					left, ok = frame.popAny()
+					vm.reg.a0, ok = frame.popAny()
 				case Bool:
-					left, ok = frame.popBool()
+					vm.reg.a0, ok = frame.popBool()
 				case Str:
-					left, ok = frame.popStr()
+					vm.reg.a0, ok = frame.popStr()
 				case Int:
-					left, ok = frame.popInt()
+					vm.reg.a0, ok = frame.popInt()
 				case Int64:
-					left, ok = frame.popInt64()
+					vm.reg.a0, ok = frame.popInt64()
 				default:
 					return vm.errBadOp(op)
 				}
@@ -125,152 +134,142 @@ func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error)
 				}
 				switch i {
 				case Eq:
-					frame.pushBool(left == right)
+					frame.pushBool(vm.reg.a1 == vm.reg.a0)
 				case Ne:
-					frame.pushBool(left != right)
+					frame.pushBool(vm.reg.a1 != vm.reg.a0)
 				default:
 					return vm.errBadOp(op)
 				}
 				continue
 			case Bool:
-				b, ok := frame.popBool()
-				if !ok {
+				if vm.reg.b1, ok = frame.popBool(); !ok {
 					return vm.errStackUnderflow()
 				}
-				a, ok := frame.popBool()
-				if !ok {
+				if vm.reg.b0, ok = frame.popBool(); !ok {
 					return vm.errStackUnderflow()
 				}
 				switch i {
 				case Eq:
-					a = a == b
+					vm.reg.b0 = vm.reg.b0 == vm.reg.b1
 				case Ne:
-					a = a != b
+					vm.reg.b0 = vm.reg.b0 != vm.reg.b1
 				case And:
-					a = a && b
+					vm.reg.b0 = vm.reg.b0 && vm.reg.b1
 				case Or:
-					a = a || b
+					vm.reg.b0 = vm.reg.b0 || vm.reg.b1
 				default:
 					return vm.errBadOp(op)
 				}
-				frame.pushBool(a)
+				frame.pushBool(vm.reg.b0)
 				continue
 			case Str:
-				b, ok := frame.popStr()
-				if !ok {
+				if vm.reg.s1, ok = frame.popStr(); !ok {
 					return vm.errStackUnderflow()
 				}
-				a, ok := frame.popStr()
-				if !ok {
+				if vm.reg.s0, ok = frame.popStr(); !ok {
 					return vm.errStackUnderflow()
 				}
 				switch i {
 				case Add:
-					frame.pushStr(a + b)
+					frame.pushStr(vm.reg.s0 + vm.reg.s1)
 				case Eq:
-					frame.pushBool(a == b)
+					frame.pushBool(vm.reg.s0 == vm.reg.s1)
 				case Ne:
-					frame.pushBool(a != b)
+					frame.pushBool(vm.reg.s0 != vm.reg.s1)
 				default:
 					return vm.errBadOp(op)
 				}
 				continue
 			case Int:
-				var right int
-				var ok bool
 				switch OpType(a) {
 				case Any:
-					x, popOk := frame.popAny()
-					if !popOk {
+					if vm.reg.a1, ok = frame.popAny(); !ok {
 						return vm.errStackUnderflow()
 					}
-					right, ok = x.(int)
+					if vm.reg.i1, ok = vm.reg.a1.(int); !ok {
+						return vm.errBadType(op, &vm.reg.i1, &vm.reg.a1)
+					}
 				case Int:
-					right, ok = frame.popInt()
+					if vm.reg.i1, ok = frame.popInt(); !ok {
+						return vm.errStackUnderflow()
+					}
 				default:
 					return vm.errBadOp(op)
 				}
-				if !ok {
-					return vm.errStackUnderflow()
-				}
-				left, ok := frame.popInt()
-				if !ok {
+				if vm.reg.i0, ok = frame.popInt(); !ok {
 					return vm.errStackUnderflow()
 				}
 				if i >= Add {
 					switch i {
 					case Add:
-						left += right
+						vm.reg.i0 += vm.reg.i1
 					case Sub:
-						left -= right
+						vm.reg.i0 -= vm.reg.i1
 					case Mul:
-						left *= right
+						vm.reg.i0 *= vm.reg.i1
 					case Div:
-						left /= right
+						vm.reg.i0 /= vm.reg.i1
 					default:
 						return vm.errBadOp(op)
 					}
-					frame.pushInt(left)
+					frame.pushInt(vm.reg.i0)
 					continue
 				}
-
 				switch i {
 				case Eq:
-					ok = left == right
+					ok = vm.reg.i0 == vm.reg.i1
 				case Ne:
-					ok = left != right
+					ok = vm.reg.i0 != vm.reg.i1
 				case Gt:
-					ok = left > right
+					ok = vm.reg.i0 > vm.reg.i1
 				case Ge:
-					ok = left >= right
+					ok = vm.reg.i0 >= vm.reg.i1
 				case Lt:
-					ok = left < right
+					ok = vm.reg.i0 < vm.reg.i1
 				case Le:
-					ok = left <= right
+					ok = vm.reg.i0 <= vm.reg.i1
 				default:
 					return vm.errBadOp(op)
 				}
 				frame.pushBool(ok)
 				continue
 			case Int64:
-				b, ok := frame.popInt64()
-				if !ok {
+				if vm.reg.i64[1], ok = frame.popInt64(); !ok {
 					return vm.errStackUnderflow()
 				}
-				a, ok := frame.popInt64()
-				if !ok {
+				if vm.reg.i64[0], ok = frame.popInt64(); !ok {
 					return vm.errStackUnderflow()
 				}
 				if i >= Add {
 					switch i {
 					case Add:
-						a += b
+						vm.reg.i64[0] += vm.reg.i64[1]
 					case Sub:
-						a -= b
+						vm.reg.i64[0] -= vm.reg.i64[1]
 					case Mul:
-						a *= b
+						vm.reg.i64[0] *= vm.reg.i64[1]
 					case Div:
-						a /= b
+						vm.reg.i64[0] /= vm.reg.i64[1]
 					default:
 						return vm.errBadOp(op)
 					}
-					frame.pushInt64(a)
+					frame.pushInt64(vm.reg.i64[0])
 					continue
 				}
 
 				switch i {
 				case Eq:
-					ok = a == b
+					ok = vm.reg.i64[0] == vm.reg.i64[1]
 				case Ne:
-					ok = a != b
+					ok = vm.reg.i64[0] != vm.reg.i64[1]
 				case Gt:
-					ok = a > b
+					ok = vm.reg.i64[0] > vm.reg.i64[1]
 				case Ge:
-					ok = a >= b
+					ok = vm.reg.i64[0] >= vm.reg.i64[1]
 				case Lt:
-					ok = a < b
+					ok = vm.reg.i64[0] < vm.reg.i64[1]
 				case Le:
-					ok = a <= b
+					ok = vm.reg.i64[0] <= vm.reg.i64[1]
 				default:
 					return vm.errBadOp(op)
 				}
@@ -368,57 +367,63 @@ func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error)
 			ma := int((a >> opTypeBits) & ((1<<opArgBits - opTypeBits) - 1))
 			switch t {
 			case Any:
-				v, ok := frame.popAny()
-				if !ok {
+				if vm.reg.a1, ok = frame.popAny(); !ok {
 					return vm.errStackUnderflow()
 				}
-				switch v := v.(type) {
+				switch v := vm.reg.a1.(type) {
 				case Memberer:
-					var m interface{}
 					switch mt {
 					case Any:
-						x, ok := frame.popAny()
-						if !ok {
+						if vm.reg.a1, ok = frame.popAny(); !ok {
 							return vm.errStackUnderflow()
 						}
-						m = x
 					case Str:
-						x, ok := frame.popStr()
-						if !ok {
+						if vm.reg.s1, ok = frame.popStr(); !ok {
 							return vm.errStackUnderflow()
 						}
-						m = x
+						vm.reg.a1 = vm.reg.s1
 					case Int64:
-						x, ok := frame.popInt64()
-						if !ok {
+						if vm.reg.i64[1], ok = frame.popInt64(); !ok {
 							return vm.errStackUnderflow()
 						}
-						m = x
+						vm.reg.a1 = vm.reg.i64[1]
 					case Int:
-						x, ok := frame.popInt()
-						if !ok {
+						if vm.reg.i1, ok = frame.popInt(); !ok {
 							return vm.errStackUnderflow()
 						}
-						m = x
+						vm.reg.a1 = vm.reg.i1
 					case Bool:
-						x, ok := frame.popBool()
-						if !ok {
+						if vm.reg.b1, ok = frame.popBool(); !ok {
 							return vm.errStackUnderflow()
 						}
-						m = x
+						vm.reg.a1 = vm.reg.b1
 					default:
 						return vm.errBadOp(op)
 					}
-					x, err := v.Member(m)
-					if err != nil {
-						return errors.Errorf2From(
-							err, "failed to get member %v from %v",
-							m, v)
-					}
-					if !frame.pushOp(OpType(ma), x) {
-						return errors.Errorf2(
-							"failed to push %v as %v",
-							x, OpType(ma))
+					if ld {
+						if vm.reg.a0, err = v.Member(vm.reg.a1); err != nil {
+							return errors.Errorf2From(
+								err, "failed to get member %v from %v",
+								vm.reg.a1, v)
+						}
+						if !frame.pushOp(OpType(ma), vm.reg.a0) {
+							return errors.Errorf2(
+								"failed to push %v as %v",
+								vm.reg.a1, OpType(ma))
+						}
+					} else {
+						return errors.Errorf(
+							"setting %v is not yet supported",
+							reflect.TypeOf((*Memberer)(nil)).Elem().Name())
+						/*if err = v.SetMember(vm.reg.a1); err != nil {
+							return errors.Errorf3From(
+								err, "failed to set member "+
+									"%[1]v (type: %[1]T) "+
+									"of %[2]v (type: %[2]T) "+
+									"to %[3]v (type: %[3]T)",
+
+							)
+						}*/
 					}
 				// TODO: complex real + imag "members"
 				case string:
@@ -442,11 +447,10 @@ func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error)
 						vm.errBadOp(op),
 						"cannot store into a string")
 				}
-				v, ok := frame.popStr()
-				if !ok {
+				if vm.reg.s0, ok = frame.popStr(); !ok {
 					return vm.errStackUnderflow()
 				}
-				if err := vm.ldMemberStr(op, frame, mt, ma, v); err != nil {
+				if err := vm.ldMemberStr(op, frame, mt, ma, vm.reg.s0); err != nil {
 					return err
 				}
 			default:
@@ -457,68 +461,63 @@ func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error)
 			ld = true
 			fallthrough
 		case StVar:
-			x, ok := frame.popAny()
-			if !ok {
+			if vm.reg.a0, ok = frame.popAny(); !ok {
 				return vm.errStackUnderflow()
 			}
-			va, ok := x.(expr.Var)
-			if !ok {
-				return vm.errBadType(op, &va, &x)
+			var va expr.Var
+			if va, ok = vm.reg.a0.(expr.Var); !ok {
+				return vm.errBadType(op, &va, &vm.reg.a0)
 			}
 			if ld {
-				v := vs.Get(va)
+				vm.reg.a0 = vs.Get(va)
 				if vmv, ok := va.(*Var); ok {
 					switch vmv.OpType {
 					case Any:
-						frame.pushAny(v)
+						frame.pushAny(vm.reg.a0)
 					case Str:
-						s, ok := v.(string)
-						if !ok {
-							return vm.errBadType(op, &s, &v)
+						if vm.reg.s1, ok = vm.reg.a0.(string); !ok {
+							return vm.errBadType(op, &vm.reg.s1, &vm.reg.a0)
 						}
-						frame.pushStr(s)
-					case Int64:
-						i, ok := v.(int64)
-						if !ok {
-							return vm.errBadType(op, &i, &v)
+						frame.pushStr(vm.reg.s1)
+					case Int64: // TODO: why is Int64 so early in the switch?
+						if vm.reg.i64[1], ok = vm.reg.a0.(int64); !ok {
+							return vm.errBadType(op, &vm.reg.i64[1], &vm.reg.a0)
 						}
-						frame.pushInt64(i)
+						frame.pushInt64(vm.reg.i64[1])
 					case Int:
-						i, ok := v.(int)
-						if !ok {
-							return vm.errBadType(op, &i, &v)
+						if vm.reg.i1, ok = vm.reg.a0.(int); !ok {
+							return vm.errBadType(op, &vm.reg.i1, &vm.reg.a0)
 						}
-						frame.pushInt(i)
+						frame.pushInt(vm.reg.i1)
 					case Bool:
-						b, ok := v.(bool)
-						if !ok {
-							return vm.errBadType(op, &b, &v)
+						if vm.reg.b1, ok = vm.reg.a0.(bool); !ok {
+							return vm.errBadType(op, &vm.reg.b1, &vm.reg.a0)
 						}
-						frame.pushBool(b)
+						frame.pushBool(vm.reg.b1)
 					default:
 						return vm.errBadOp(op)
 					}
 					continue
 				}
-				frame.pushAny(x)
+				frame.pushAny(vm.reg.a1)
 				continue
 			}
 			switch t {
 			case Any:
-				x, ok = frame.popAny()
+				vm.reg.a0, ok = frame.popAny()
 			case Str:
-				x, ok = frame.popStr()
+				vm.reg.a0, ok = frame.popStr()
 			case Int64:
-				x, ok = frame.popInt64()
+				vm.reg.a0, ok = frame.popInt64()
 			case Int:
-				x, ok = frame.popInt()
+				vm.reg.a0, ok = frame.popInt()
 			case Bool:
-				x, ok = frame.popBool()
+				vm.reg.a0, ok = frame.popBool()
 			}
 			if !ok {
 				return vm.errStackUnderflow()
 			}
-			vs.Set(va, x)
+			vs.Set(va, vm.reg.a0)
 			continue
 		case Conv:
 			src, trg := t, OpType(a)
@@ -527,112 +526,105 @@ func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error)
 			}
 			switch src {
 			case Any:
-				x, ok := frame.popAny()
-				if !ok {
+				if vm.reg.a0, ok = frame.popAny(); !ok {
 					return vm.errStackUnderflow()
 				}
 				switch trg {
 				case Any:
-					frame.pushAny(x)
+					frame.pushAny(vm.reg.a0)
 				case Bool:
-					var b bool
-					switch x := x.(type) {
+					switch x := vm.reg.a0.(type) {
 					case bool:
-						b = x
+						vm.reg.b0 = x
 					case int:
-						b = x != 0
+						vm.reg.b0 = x != 0
 					case string:
-						b = !(x == "" || x == "false")
+						vm.reg.b0 = !(x == "" || x == "false")
 					default:
-						b = x != nil
+						vm.reg.b0 = x != nil
 					}
-					frame.pushBool(b)
+					frame.pushBool(vm.reg.b0)
 				case Int:
-					var i int
-					switch x := x.(type) {
+					switch x := vm.reg.a0.(type) {
 					case bool:
 						if x {
-							i++
+							vm.reg.i0 = 1
+						} else {
+							vm.reg.i0 = 0
 						}
 					case int:
-						i = x
+						vm.reg.i0 = x
 					case string:
-						i2, err := strconv.Atoi(x)
-						if err != nil {
+						if vm.reg.i0, err = strconv.Atoi(x); err != nil {
 							return err
 						}
-						i = i2
 					default:
-						i2, err := strconv.Atoi(fmt.Sprint(x))
-						if err != nil {
+						if vm.reg.i0, err = strconv.Atoi(fmt.Sprint(x)); err != nil {
 							return err
 						}
-						i = i2
 					}
-					frame.pushInt(i)
+					frame.pushInt(vm.reg.i0)
 				case Str:
-					frame.pushStr(fmt.Sprint(x))
+					frame.pushStr(fmt.Sprint(vm.reg.a0))
 				default:
 					return vm.errBadOp(op)
 				}
 			case Bool:
-				b, ok := frame.popBool()
-				if !ok {
+				if vm.reg.b0, ok = frame.popBool(); !ok {
 					return vm.errStackUnderflow()
 				}
 				switch trg {
 				case Any:
-					frame.pushAny(b)
+					frame.pushAny(vm.reg.b0)
 				case Bool:
-					frame.pushBool(b)
+					frame.pushBool(vm.reg.b0)
 				case Int:
-					i := 0
-					if b {
-						i++
+					if vm.reg.b0 {
+						vm.reg.i0 = 1
+					} else {
+						vm.reg.i0 = 0
 					}
-					frame.pushInt(i)
+					frame.pushInt(vm.reg.i0)
 				case Str:
-					s := "false"
-					if b {
-						s = "true"
+					if vm.reg.b0 {
+						vm.reg.s0 = "true"
+					} else {
+						vm.reg.s0 = "false"
 					}
-					frame.pushStr(s)
+					frame.pushStr(vm.reg.s0)
 				default:
 					return vm.errBadOp(op)
 				}
 			case Int:
-				i, ok := frame.popInt()
-				if !ok {
+				if vm.reg.i0, ok = frame.popInt(); !ok {
 					return vm.errStackUnderflow()
 				}
 				switch trg {
 				case Any:
-					frame.pushAny(i)
+					frame.pushAny(vm.reg.i0)
 				case Bool:
-					frame.pushBool(i != 0)
+					frame.pushBool(vm.reg.i0 != 0)
 				case Int:
-					frame.pushInt(i)
+					frame.pushInt(vm.reg.i0)
 				case Str:
-					frame.pushStr(strconv.Itoa(i))
+					frame.pushStr(strconv.Itoa(vm.reg.i0))
 				default:
 					return vm.errBadOp(op)
 				}
 			case Str:
-				s, ok := frame.popStr()
-				if !ok {
+				if vm.reg.s0, ok = frame.popStr(); !ok {
 					return vm.errStackUnderflow()
 				}
 				switch trg {
 				case Any:
-					frame.pushAny(s)
+					frame.pushAny(vm.reg.s0)
 				case Bool:
-					frame.pushBool(s != "" && s != "false")
+					frame.pushBool(vm.reg.s0 != "" && vm.reg.s0 != "false")
 				case Int:
-					i, err := strconv.Atoi(s)
-					if err != nil {
+					if vm.reg.i0, err = strconv.Atoi(vm.reg.s0); err != nil {
 						return err
 					}
-					frame.pushInt(i)
+					frame.pushInt(vm.reg.i0)
 				default:
 					return vm.errBadOp(op)
 				}
@@ -646,51 +638,46 @@ func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error)
 			case Any:
 				vs := make([]interface{}, n)
 				for i := 0; i < n; i++ {
-					x, ok := frame.popAny()
-					if !ok {
+					if vm.reg.a0, ok = frame.popAny(); !ok {
 						return vm.errStackUnderflow()
 					}
-					vs[len(vs)-1-i] = x
+					vs[len(vs)-1-i] = vm.reg.a0
 				}
 				v = vs
 			case Str:
 				vs := make([]string, n)
 				for i := 0; i < n; i++ {
-					x, ok := frame.popStr()
-					if !ok {
+					if vm.reg.s0, ok = frame.popStr(); !ok {
 						return vm.errStackUnderflow()
 					}
-					vs[len(vs)-1-i] = x
+					vs[len(vs)-1-i] = vm.reg.s0
 				}
 				v = vs
 			case Int64:
 				vs := make([]int64, n)
 				for i := 0; i < n; i++ {
-					x, ok := frame.popInt64()
-					if !ok {
+					if vm.reg.i64[0], ok = frame.popInt64(); !ok {
 						return vm.errStackUnderflow()
 					}
-					vs[len(vs)-1-i] = x
+					vs[len(vs)-1-i] = vm.reg.i64[0]
 				}
 				v = vs
 			case Int:
 				vs := make([]int, n)
 				for i := 0; i < n; i++ {
-					x, ok := frame.popInt()
-					if !ok {
+					if vm.reg.i0, ok = frame.popInt(); !ok {
 						return vm.errStackUnderflow()
 					}
-					vs[len(vs)-1-i] = x
+					vs[len(vs)-1-i] = vm.reg.i0
 				}
 				v = vs
 			case Bool:
 				vs := make([]bool, n)
 				for i := 0; i < n; i++ {
-					x, ok := frame.popBool()
-					if !ok {
+					if vm.reg.b0, ok = frame.popBool(); !ok {
 						return vm.errStackUnderflow()
 					}
-					vs[len(vs)-1-i] = x
+					vs[len(vs)-1-i] = vm.reg.b0
 				}
 				v = vs
 			default:
@@ -699,58 +686,57 @@ func (vm *VM) execFunc(ctx context.Context, f *Func, vs expr.Values) (err error)
 			frame.pushAny(v)
 			continue
 		case Unpack:
-			v, ok := frame.popAny()
-			if !ok {
+			if vm.reg.a0, ok = frame.popAny(); !ok {
 				return vm.errStackUnderflow()
 			}
 			switch t {
 			case Any:
-				vs, ok := v.([]interface{})
+				vs, ok := vm.reg.a0.([]interface{})
 				if !ok {
-					return vm.errBadType(op, &vs, &v)
+					return vm.errBadType(op, &vs, &vm.reg.a0)
 				}
-				for _, v := range vs {
-					frame.pushAny(v)
+				for _, vm.reg.a0 = range vs {
+					frame.pushAny(vm.reg.a0)
 				}
 			case Str:
-				vs, ok := v.([]string)
+				vs, ok := vm.reg.a0.([]string)
 				if !ok {
-					return vm.errBadType(op, &vs, &v)
+					return vm.errBadType(op, &vs, &vm.reg.a0)
 				}
-				for _, v := range vs {
-					frame.pushStr(v)
+				for _, vm.reg.s0 = range vs {
+					frame.pushStr(vm.reg.s0)
 				}
 			case Int64:
-				vs, ok := v.([]int64)
+				vs, ok := vm.reg.a0.([]int64)
 				if !ok {
-					return vm.errBadType(op, &vs, &v)
+					return vm.errBadType(op, &vs, &vm.reg.a0)
 				}
-				for _, v := range vs {
-					frame.pushInt64(v)
+				for _, vm.reg.i64[0] = range vs {
+					frame.pushInt64(vm.reg.i64[0])
 				}
 			case Int:
-				vs, ok := v.([]int)
+				vs, ok := vm.reg.a0.([]int)
 				if !ok {
-					return vm.errBadType(op, &vs, &v)
+					return vm.errBadType(op, &vs, &vm.reg.a0)
 				}
-				for _, v := range vs {
-					frame.pushInt(v)
+				for _, vm.reg.i0 = range vs {
+					frame.pushInt(vm.reg.i0)
 				}
 			case Bool:
-				vs, ok := v.([]bool)
+				vs, ok := vm.reg.a0.([]bool)
 				if !ok {
-					return vm.errBadType(op, &vs, &v)
+					return vm.errBadType(op, &vs, &vm.reg.a0)
 				}
-				for _, v := range vs {
-					frame.pushBool(v)
+				for _, vm.reg.b0 = range vs {
+					frame.pushBool(vm.reg.b0)
 				}
 			default:
 				return vm.errBadOp(op)
 			}
 			continue
 		case Ret:
-			// TODO: zero-out the sliced-out values from the frame
-			// so they don't hold onto memory
+			// TODO: Outermost call should nil out any and str
+			// pointers to release memory.
 			vm.stack.anys = vm.stack.anys[:frame.frame.anys[0]+f.rets.anys]
 			vm.stack.strs = vm.stack.strs[:frame.frame.strs[0]+f.rets.strs]
 			vm.stack.ints = vm.stack.ints[:frame.frame.ints[0]+f.rets.ints]

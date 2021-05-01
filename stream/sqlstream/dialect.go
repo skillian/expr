@@ -5,12 +5,13 @@ import (
 	"math/bits"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/skillian/expr/errors"
+	"github.com/skillian/expr/internal"
 	"github.com/skillian/expr/stream/sqlstream/sqltypes"
 )
 
@@ -18,10 +19,10 @@ import (
 // "flavor" of SQL.
 type Dialect interface {
 	// DialectFlags gets the set of boolean dialect options
-	DialectFlags() DialectFlags
+	Flags() DialectFlags
 
-	// Escape an identifier so it can safely be used in raw SQL.  This is
-	// not safe from malicious misuse.
+	// Escape an identifier so it can be used in raw SQL.
+	// This is not safe from malicious misuse.
 	Escape(id string) string
 
 	// DataTypeName generates the SQL name of the given datatype
@@ -95,10 +96,10 @@ func selectTimeTypeName(t sqltypes.TimeType, ttns []TimeTypeName) (string, error
 
 type defaultDialect struct{}
 
-func (d defaultDialect) DialectFlags() DialectFlags { return DialectLimitSuffix }
+func (d defaultDialect) Flags() DialectFlags { return DialectLimitSuffix }
 
 func (d defaultDialect) Escape(id string) string {
-	if strings.Contains(id, "\"\"") {
+	if strings.Contains(id, "\"") {
 		id = strings.Join(strings.Split(id, "\""), "\"\"")
 	}
 	return strings.Join([]string{"\"", "\""}, id)
@@ -106,7 +107,7 @@ func (d defaultDialect) Escape(id string) string {
 
 type mssql struct{ defaultDialect }
 
-func (mssql) DialectFlags() DialectFlags { return DialectTopInfix | DialectOutputInfix }
+func (mssql) Flags() DialectFlags { return DialectTopInfix | DialectOutputInfix }
 
 var mssqlTimeTypes = []TimeTypeName{
 	{TimeType: sqltypes.TimeType{
@@ -214,7 +215,7 @@ func (mssql) tableExists(ctx context.Context, db *DB, t *table) (exists bool, er
 
 type sqlite3 struct{ defaultDialect }
 
-func (sqlite3) DialectFlags() DialectFlags { return DialectLimitSuffix | DriverSupportsLastRowID }
+func (sqlite3) Flags() DialectFlags { return DialectLimitSuffix | DriverSupportsLastRowID }
 
 var sqlite3TimeTypeNames = []TimeTypeName{
 	{TimeType: sqltypes.TimeType{
@@ -316,12 +317,13 @@ var (
 	CamelCase Namer = caseNamer{capInitial: false}
 
 	// DefaultCase is a built-in naming convention
-	DefaultCase = DefaultNamer{
-		acronyms: map[string]string{
+	DefaultCase = func() (n DefaultNamer) {
+		n.acronyms.Store(map[string]string{
 			"Id":  "ID",
 			"Sql": "SQL",
-		},
-	}
+		})
+		return
+	}()
 
 	// PascalCase renames string names into PascalCase
 	PascalCase Namer = caseNamer{capInitial: true}
@@ -337,6 +339,12 @@ type caseNamer struct {
 func (cr caseNamer) Apply(s string) string {
 	rs := make([]rune, 0, len(s))
 	inSpace := false
+	var initialer func(rune) rune
+	if cr.capInitial {
+		initialer = unicode.ToUpper
+	} else {
+		initialer = unicode.ToLower
+	}
 	for _, r := range s {
 		if unicode.IsSpace(r) {
 			inSpace = true
@@ -346,11 +354,7 @@ func (cr caseNamer) Apply(s string) string {
 			continue
 		}
 		if len(rs) == 0 {
-			if cr.capInitial {
-				r = unicode.ToUpper(r)
-			} else {
-				r = unicode.ToLower(r)
-			}
+			r = initialer(r)
 		} else if inSpace {
 			r = unicode.ToUpper(r)
 		} else {
@@ -364,7 +368,7 @@ func (cr caseNamer) Apply(s string) string {
 
 func (caseNamer) Parse(s string) string {
 	s = strings.TrimSpace(s)
-	rs := make([]rune, 0, 1<<bits.Len(uint(len(s))))
+	rs := make([]rune, 0, internal.CapForLen(len(s)))
 	for i, r := range s {
 		if i > 0 && unicode.IsUpper(r) {
 			rs = append(rs, ' ')
@@ -377,8 +381,15 @@ func (caseNamer) Parse(s string) string {
 // DefaultNamer is a default Namer convention that follows Go's identifier
 // naming convention.
 type DefaultNamer struct {
-	mu       sync.Mutex
-	acronyms map[string]string
+	acronyms atomic.Value //map[string]string
+}
+
+func (n *DefaultNamer) getAcronyms() map[string]string {
+	return n.acronyms.Load().(map[string]string)
+}
+
+func (n *DefaultNamer) setAcronyms(m map[string]string) {
+	n.acronyms.Store(m)
 }
 
 // Apply a the naming convention to s
@@ -388,14 +399,12 @@ func (n *DefaultNamer) Apply(s string) string {
 		first, n := utf8.DecodeRuneInString(f)
 		fields[i] = string(unicode.ToUpper(first)) + f[n:]
 	}
-	// TODO: Maybe RCU?
-	n.mu.Lock()
+	m := n.getAcronyms()
 	for i, f := range fields {
-		if u, ok := n.acronyms[f]; ok {
+		if u, ok := m[f]; ok {
 			fields[i] = u
 		}
 	}
-	n.mu.Unlock()
 	return strings.Join(fields, "")
 }
 

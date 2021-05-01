@@ -26,7 +26,10 @@ type Streamer interface {
 
 // Stream is an actual stream of values created from a Streamer.
 type Stream interface {
-	// Next advances the stream to its next element
+	// Next advances the stream to its next element.  After a stream is
+	// depleted of its values, Next will return io.EOF (or a wrapper around
+	// that value).  To check if any of the wrapped errors are io.EOF, use
+	// the IsEOF function.
 	Next(ctx context.Context) error
 
 	// Var gets the var of this stream's result.  The var should be the same

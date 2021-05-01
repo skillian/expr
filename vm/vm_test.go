@@ -18,7 +18,7 @@ type vmTest struct {
 }
 
 var vmTests = [...]vmTest{
-	vmTest{
+	{
 		name: "helloWorld",
 		vmfn: vm.MustNewFunc(
 			nil, vm.OpCodes{vm.OpCode(vm.Nop)}, nil),
@@ -33,7 +33,7 @@ var vmTests = [...]vmTest{
 					vm.EncodeOp(vm.LdConst, vm.Int, 0),
 					vm.EncodeOp(vm.Add, vm.Int, vm.OpArg(vm.Int)),
 					vm.EncodeOp(vm.StStack, vm.Int, 0),
-				}, []vm.Var{vm.Var{OpType: vm.Int}}[:1:1], vm.FuncConsts(vm.MakeValues(1))),
+				}, []vm.Var{{OpType: vm.Int}}[:1:1], vm.FuncConsts(vm.MakeValues(1))),
 			args: expr.NoValues,
 			res:  int(2),
 		}
@@ -41,9 +41,9 @@ var vmTests = [...]vmTest{
 	}(),
 	func() vmTest {
 		params := []vm.Var{
-			vm.Var{OpType: vm.Str},
-			vm.Var{OpType: vm.Str},
-			vm.Var{OpType: vm.Str},
+			{OpType: vm.Str},
+			{OpType: vm.Str},
+			{OpType: vm.Str},
 		}
 		t := vmTest{
 			name: "argPlusArg",
@@ -62,6 +62,18 @@ var vmTests = [...]vmTest{
 		}
 		return t
 	}(),
+	{
+		name: "stackOrderGood",
+		vmfn: vm.MustNewFunc(nil, vm.OpCodes{
+			vm.EncodeOp(vm.LdConst, vm.Str, 0),
+			vm.EncodeOp(vm.LdConst, vm.Str, 1),
+			vm.EncodeOp(vm.Add, vm.Str, 0),
+		}, []vm.Var{{OpType: vm.Str}}, vm.FuncConsts(
+			vm.MakeValues("hello", "world"),
+		)),
+		args: expr.NoValues,
+		res:  "helloworld",
+	},
 }
 
 func TestVM(t *testing.T) {

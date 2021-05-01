@@ -82,8 +82,8 @@ var queryTests = []queryTest{
 		name: "join2",
 		test: func(ctx context.Context, vs expr.Values, db *sqlstream.DB) error {
 			todos := [...]*Todo{
-				&Todo{TodoName: "test 101"},
-				&Todo{TodoName: "test 102"},
+				{TodoName: "test 101"},
+				{TodoName: "test 102"},
 			}
 			err := db.Save(ctx, todos[0], todos[1])
 			if err != nil {
@@ -91,7 +91,7 @@ var queryTests = []queryTest{
 					err, "failed to save 2 Todos")
 			}
 			todoDeps := [...]*TodoDep{
-				&TodoDep{TodoID: todos[0].TodoID, DepID: todos[1].TodoID},
+				{TodoID: todos[0].TodoID, DepID: todos[1].TodoID},
 			}
 			err = db.Save(ctx, todoDeps[0])
 			if err != nil {
@@ -147,7 +147,7 @@ func TestQuery(t *testing.T) {
 	defer logging.TestingHandler(logger, t,
 		logging.HandlerLevel(logging.VerboseLevel))()
 	vs := expr.NewValues()
-	ctx, _ := expr.AddValuesToContext(context.Background(), vs)
+	ctx := expr.AddValuesToContext(context.Background(), vs)
 	for i := range queryTests {
 		i := i
 		tc := &queryTests[i]

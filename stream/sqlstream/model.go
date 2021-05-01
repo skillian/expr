@@ -51,13 +51,27 @@ type sqlTypesAppender interface {
 	AppendSQLTypes(ts []sqltypes.Type) []sqltypes.Type
 }
 
-// Model describes data returned as rows from a query, but not
-// necessarily from a single table.
+// Model describes rows of data, such as those returned from tables, views,
+// stored procedures, functions, etc.
+//
+// AppendValues and AppendFields are used to access and mutate, respectively,
+// the fields within the model.  AppendNames and AppendSQLTypes are used to
+// match fields/values together with result sets coming from the underlying
+// driver(s).
+//
+// These functions append to slices instead of allocating new slices so that
+// callers can pre-allocate slices or easily compound slices of multiple models.
 type Model interface {
 	fieldsAppender
 	namesAppender
 	valuesAppender
 	sqlTypesAppender
+}
+
+// Modeler is implemented by types that aren't models, but can produce
+// their models.
+type Modeler interface {
+	Model() Model
 }
 
 // IDModeler returns a Model implementation that describes its unique
@@ -69,22 +83,27 @@ type IDModeler interface {
 
 // zeroValues is a hash set of zero values for common SQL field types
 var zeroValues = map[interface{}]struct{}{
-	false:     struct{}{},
-	int(0):    struct{}{},
-	int8(0):   struct{}{},
-	int16(0):  struct{}{},
-	int32(0):  struct{}{},
-	int64(0):  struct{}{},
-	uint(0):   struct{}{},
-	uint8(0):  struct{}{},
-	uint16(0): struct{}{},
-	uint32(0): struct{}{},
-	uint64(0): struct{}{},
-	"":        struct{}{},
+	false:     {},
+	int(0):    {},
+	int8(0):   {},
+	int16(0):  {},
+	int32(0):  {},
+	int64(0):  {},
+	uint(0):   {},
+	uint8(0):  {},
+	uint16(0): {},
+	uint32(0): {},
+	uint64(0): {},
+	"":        {},
 }
 
 // valuesAreZero checks if all of the values in the slice are zero
 // values.
+//
+// This function is used by, for example, the (*DB).Save function to check if
+// a model already has values for its ID fields.  If so, it is assumed that
+// Save should update existing records.  Otherwise, Save should insert new
+// records.
 func valuesAreZero(vs []interface{}) bool {
 	if len(vs) == 0 {
 		return true
@@ -109,7 +128,8 @@ func valuesAreZero(vs []interface{}) bool {
 }
 
 // Scanner is implemented by *sql.Row and *sql.Rows in the go database/sql
-// package
+// package.  By defining it here, the same code can work with both database/sql
+// types.
 type Scanner interface {
 	Scan(vs ...interface{}) error
 }
@@ -188,6 +208,8 @@ func ModelOf(v interface{}) (Model, error) {
 	switch v := v.(type) {
 	case Model:
 		return v, nil
+	case Modeler:
+		return v.Model(), nil
 	}
 	rv := reflect.ValueOf(v)
 	if !rv.IsValid() {
@@ -240,6 +262,19 @@ func ModelOf(v interface{}) (Model, error) {
 	return m, nil
 }
 
+// ModelsOf creates a slice of models from the given values.
+func ModelsOf(vs ...interface{}) ([]Model, error) {
+	ms := make([]Model, len(vs))
+	for i, v := range vs {
+		m, err := ModelOf(v)
+		if err != nil {
+			return nil, err
+		}
+		ms[i] = m
+	}
+	return ms, nil
+}
+
 // ModelsOf2 calls ModelOf on each parameter and returns their models in order.
 func ModelsOf2(v0, v1 interface{}) (m0, m1 Model, err error) {
 	if m0, err = ModelOf(v0); err != nil {
@@ -268,7 +303,10 @@ func MustModelOf(v interface{}) Model {
 	return m
 }
 
-var modelFieldDefs sync.Map
+var (
+	modelFieldDefs sync.Map
+	int64PtrType   = reflect.TypeOf((*int64)(nil))
+)
 
 // ModelField creates a model from the given field.  It's useful for defining
 // a struct's ID model.
@@ -310,9 +348,10 @@ func ModelField(struc, field interface{}) Model {
 	case *int64:
 		return Int64Model{ID: f, Name: v.sf.Name}
 	}
-	panic(errors.Errorf2(
-		"cannot create Model from field %[1]p of %[2]p (type: %[2]T)",
-		field, struc))
+	// TODO:
+	// handle converibles to *int64 And struct ptrs whose first fields are
+	// convertible to int64
+	panic("TODO")
 }
 
 func (m reflectModel) AppendFields(fs []interface{}) []interface{} {

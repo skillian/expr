@@ -6,7 +6,12 @@ import (
 	"time"
 
 	"github.com/skillian/expr/stream/sqlstream/sqltypes"
+	"github.com/skillian/logging"
 )
+
+var logger = logging.GetLogger(
+	"expr/stream/sqlstream/sqltypes",
+	logging.LoggerLevel(logging.VerboseLevel))
 
 type parseTest struct {
 	str string
@@ -21,11 +26,13 @@ var parseTests = []parseTest{
 	{str: "nullable(bytes(length: 128, var: true))", res: sqltypes.Nullable{sqltypes.BytesType{Length: 128, Var: true}}, err: ""},
 	{str: "date(min: 1901-01-01, max: 2100-12-31, prec: 1s)", res: sqltypes.TimeType{Min: date(1901, 1, 1), Max: date(2100, 12, 31), Prec: 1 * time.Second}, err: ""},
 	{str: "date(min: \"January 1, 1800\", max: \"December 20th, 2100\", prec: 1m)", res: sqltypes.TimeType{Min: date(1800, 1, 1), Max: date(2100, 12, 20), Prec: 1 * time.Minute}, err: ""},
+	{str: "date(min: 'January 1, 1800', max: 'December 20th, 2100', prec: 1m)", res: sqltypes.TimeType{Min: date(1800, 1, 1), Max: date(2100, 12, 20), Prec: 1 * time.Minute}, err: ""},
 }
 
 func TestParse(t *testing.T) {
 	for _, tc := range parseTests {
 		t.Run(tc.str, func(t *testing.T) {
+			defer logging.TestingHandler(logger, t, logging.HandlerLevel(logging.VerboseLevel))()
 			res, err := sqltypes.Parse(tc.str)
 			if err != nil {
 				if tc.err != "" && strings.Contains(err.Error(), tc.err) {

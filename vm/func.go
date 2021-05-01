@@ -120,7 +120,7 @@ func (f *Func) Call(ctx context.Context, vs expr.Values) (interface{}, error) {
 		p := &params[i]
 		va := f.vars[i]
 		v := vs.Get(va)
-		logger.Verbose4("Call: %#v = (f.vars[%d] (%p) = %p)", p, i, va, v)
+		logger.Verbose4("Call: %#v = (f.vars[%d] (%v) = %v)", p, i, va, v)
 		if !frame.pushOp(p.OpType, v) {
 			return nil, errors.Errorf3(
 				"failed to push %[1]s parameter %[2]d value "+
@@ -131,7 +131,6 @@ func (f *Func) Call(ctx context.Context, vs expr.Values) (interface{}, error) {
 	if err := vm.execFunc(ctx, f, vs); err != nil {
 		return nil, err
 	}
-	logger.Verbose1("\t\t\treturned: %[1]v (type %[1]T)", vm.stack.anys[0])
 	switch len(f.params) {
 	case 0:
 		return nil, nil

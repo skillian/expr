@@ -37,7 +37,7 @@ var (
 			}
 			return t
 		}(),
-		funcTest{
+		{
 			name:   "subtraction",
 			values: expr.NewValues(),
 			expr:   expr.Sub{2, 1},
@@ -78,8 +78,8 @@ var (
 		}(),
 		func() funcTest {
 			vars := [...]vm.Var{
-				vm.Var{OpType: vm.Str},
-				vm.Var{OpType: vm.Str},
+				{OpType: vm.Str},
+				{OpType: vm.Str},
 			}
 			vs := expr.NewValues(
 				expr.VarValuePair{Var: &vars[0], Value: "abc"},

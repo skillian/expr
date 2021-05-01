@@ -26,8 +26,6 @@ type FuncPostCompileOption func(f *funcCompiler) error
 func (f FuncPostCompileOption) Apply(c *funcCompiler) error { return f(c) }
 
 // FuncFromExpr creates a Func from the given expression.
-//
-// Any vars encountered in the
 func FuncFromExpr(vars []expr.Var, e expr.Expr, options ...FuncOption) (*Func, error) {
 	var fc funcCompiler
 	fc.init(vars, e)
@@ -43,8 +41,8 @@ func FuncFromExpr(vars []expr.Var, e expr.Expr, options ...FuncOption) (*Func, e
 		return nil, err
 	}
 	for _, o := range options {
-		if pre, ok := o.(FuncPostCompileOption); ok {
-			if err := pre(&fc); err != nil {
+		if post, ok := o.(FuncPostCompileOption); ok {
+			if err := post(&fc); err != nil {
 				return nil, err
 			}
 		}

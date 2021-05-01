@@ -116,6 +116,17 @@ func (qb *queryBuilder) sqlifyExpr(e expr.Expr) string {
 				opstr = "?"
 				qb.sqlVars = append(qb.sqlVars, queryVar{e, qb.numArgs})
 				qb.numArgs++
+			case expr.SubStr:
+				infix = " LIKE "
+				a, b := top.opstrs[0], top.opstrs[1]
+				top.opstrs[0], top.opstrs[1] = b, strings.Join([]string{
+					"'%' + ",
+					a,
+					" + '%'",
+				}, "")
+			case In:
+				infix = " IN "
+				top.opstrs[1] = strings.Join([]string{"(", ")"}, top.opstrs[1])
 			default:
 				if m, ok := sec.e.(expr.Mem); ok {
 					opstr = qb.q.from.columns[m[1].(int)].sqlName
@@ -146,7 +157,7 @@ func (qb *queryBuilder) sqlifyExpr(e expr.Expr) string {
 
 func (qb *queryBuilder) buildSQL() string {
 	qb.append("SELECT ")
-	if qb.q.limit != 0 && qb.q.db.dialect.DialectFlags().HasAll(DialectTopInfix) {
+	if qb.q.limit != 0 && qb.q.db.dialect.Flags().HasAll(DialectTopInfix) {
 		qb.append("TOP (")
 		qb.append(strconv.FormatInt(qb.q.limit, 10))
 		qb.append(") ")
@@ -173,7 +184,7 @@ func (qb *queryBuilder) buildSQL() string {
 		qb.append(" WHERE ", qb.sqlifyExpr(qb.q.where))
 	}
 	// TODO: Sorting
-	if qb.q.limit != 0 && qb.q.db.dialect.DialectFlags().HasAll(DialectLimitSuffix) {
+	if qb.q.limit != 0 && qb.q.db.dialect.Flags().HasAll(DialectLimitSuffix) {
 		qb.append(" LIMIT ")
 		qb.append(strconv.FormatInt(qb.q.limit, 10))
 	}

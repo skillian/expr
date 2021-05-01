@@ -1,9 +1,5 @@
 package expr
 
-import (
-	"strings"
-)
-
 // Expr defines an expression
 type Expr interface{}
 
@@ -192,17 +188,14 @@ type Var interface {
 	Var() Var
 }
 
-type varString struct{ s string }
+type variable struct{}
 
-func newVar(name string) Var { return &varString{s: name} }
+// NewVar creates a new Var.
+func NewVar() Var { return new(variable) }
 
-func (v *varString) String() string {
-	return strings.Join([]string{"var(", v.s, ")"}, "")
-}
+func (v *variable) Var() Var { return v }
 
-func (v *varString) Var() Var { return v }
-
-var _ Var = (*varString)(nil)
+var _ Var = (*variable)(nil)
 
 // IsBool returns true if the expression evaluates to a boolean value
 func IsBool(e Expr) bool {

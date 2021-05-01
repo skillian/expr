@@ -28,16 +28,11 @@ var localTests = []func() localTest{
 			name: "helloWorld",
 			src:  &stream.Slice{1, 2, 3, 4, 5},
 			fn: func(s stream.Streamer) (stream.Streamer, error) {
-				var err error
-				s, err = stream.Filter(s, expr.Lt{s.Var(), 4})
-				if err != nil {
-					return nil, err
-				}
-				s, err = stream.Map(s, expr.Mul{s.Var(), 2})
-				if err != nil {
-					return nil, err
-				}
-				return s, nil
+				return stream.LineOf(s, func(sl stream.Line) stream.Line {
+					return sl.Filter(expr.Lt{sl, 4})
+				}, func(sl stream.Line) stream.Line {
+					return sl.Map(expr.Mul{sl, 2})
+				}), nil
 			},
 			res: []interface{}{2, 4, 6},
 		}
@@ -123,7 +118,7 @@ func TestLocal(t *testing.T) {
 		tc := localTests[i]()
 		t.Run(tc.name, func(t *testing.T) {
 			vs := expr.NewValues()
-			ctx, _ = expr.AddValuesToContext(ctx, vs)
+			ctx = expr.AddValuesToContext(ctx, vs)
 			s, err := tc.fn(tc.src)
 			if err != nil {
 				t.Fatal(err)

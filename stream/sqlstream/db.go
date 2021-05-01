@@ -28,8 +28,17 @@ type DB struct {
 	columnNamer Namer
 	tableNamer  Namer
 	tables      map[reflect.Type]*table
-	ifacefree   [][]interface{}
-	stringfree  [][]string
+	freelists   struct {
+		ifaces [][]interface{}
+		strs   [][]string
+	}
+}
+
+// sqlCmdImpl executes SQL commands like statements and queries.
+type sqlCmdImpl interface {
+	ExecContext(ctx context.Context, stmt string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, stmt string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, stmt string, args ...interface{}) *sql.Row
 }
 
 // DBOption configures a DB
@@ -39,19 +48,24 @@ type DBOption func(db *DB) error
 // required
 func NewDB(sqlDB *sql.DB, options ...DBOption) (*DB, error) {
 	db := &DB{
-		DB:         sqlDB,
-		tables:     make(map[reflect.Type]*table),
-		ifacefree:  append(make([][]interface{}, 0, 8), make([]interface{}, 0, 8)),
-		stringfree: append(make([][]string, 0, 8), make([]string, 0, 8)),
+		DB:     sqlDB,
+		tables: make(map[reflect.Type]*table),
 	}
-	c := cap(db.ifacefree)
-	ifaces := make([]interface{}, c*c)
-	strs := make([]string, cap(ifaces))
-	for i := range db.ifacefree {
-		a := i * c
-		b := (i + 1) * c
-		db.ifacefree[i] = ifaces[a:a:b]
-		db.stringfree[i] = strs[a:a:b]
+	// Build some initial empty []interface{} and []string slices:
+	{
+		const arbitraryCapacity = 8
+		//
+		c := arbitraryCapacity
+		db.freelists.ifaces = make([][]interface{}, 0, c)
+		db.freelists.strs = make([][]string, 0, c)
+		ifaces := make([]interface{}, c*c)
+		strs := make([]string, cap(ifaces))
+		for i := range db.freelists.ifaces {
+			a := i * c
+			b := (i + 1) * c
+			db.freelists.ifaces[i] = ifaces[a:a:b]
+			db.freelists.strs[i] = strs[a:a:b]
+		}
 	}
 	for _, opt := range options {
 		if err := opt(db); err != nil {
@@ -88,8 +102,10 @@ func (db *DB) CreateCollection(ctx context.Context, v interface{}) error {
 	var isID map[interface{}]struct{}
 	var idSQLNames []string
 	if idm, ok := db.IDOf(m); ok {
-		fields = m.AppendFields(db.getifaces())
-		idFields = idm.AppendFields(db.getifaces())
+		db.mu.Lock()
+		fields = m.AppendFields(db.getifacesLocked())
+		idFields = idm.AppendFields(db.getifacesLocked())
+		db.mu.Unlock()
 		logger.Verbose2("fields: %#v, idFields:%#v", fields, idFields)
 		isID = make(map[interface{}]struct{}, len(idFields))
 		for _, f := range idFields {
@@ -160,7 +176,7 @@ func (db *DB) idOf(L sync.Locker, m Model) (Model, bool) {
 		v = m
 	}
 	L.Lock()
-	t := db.getTableUnsafe(v, m)
+	t := db.getTableLocked(v, m)
 	L.Unlock()
 	if !strings.HasPrefix(t.columns[0].rawName, t.rawName) || !strings.HasSuffix(t.columns[0].rawName, "ID") {
 		return nil, false
@@ -169,12 +185,12 @@ func (db *DB) idOf(L sync.Locker, m Model) (Model, bool) {
 	var n string
 	{
 		L.Lock()
-		fs := m.AppendFields(db.getifacesUnsafe())
-		ns := m.AppendNames(db.getstringsUnsafe())
+		fs := m.AppendFields(db.getifacesLocked())
+		ns := m.AppendNames(db.getstringsLocked())
 		f, ok = fs[0].(*int64)
 		n = ns[0]
-		db.putifacesUnsafe(fs)
-		db.putstringsUnsafe(ns)
+		db.putifacesLocked(fs)
+		db.putstringsLocked(ns)
 		L.Unlock()
 	}
 	if !ok {
@@ -190,11 +206,27 @@ type dbcmd struct {
 
 var qmarkAndCommas = strings.Repeat("?, ", 256)
 
-// Save some records.  The records do not have to be the same type.
+// Save some records.  The records do not have to be the same type.  Nested
+// slices of []interface{} or []Model are recursively unpacked and saved.
 func (db *DB) Save(ctx context.Context, vs ...interface{}) error {
 	ids, ws := db.getifaces(), db.getifaces()
 	defer db.putifaces(ws, ids)
+	var cmder sqlCmdImpl
+	if tx, ok := TxFromContext(ctx); ok {
+		cmder = tx
+	} else {
+		cmder = db.DB
+	}
 	for _, v := range vs {
+		switch v := v.(type) {
+		case []interface{}:
+			return db.Save(ctx, v...)
+		case []Model:
+			for _, x := range v {
+				ws = append(ws, x)
+			}
+			return db.Save(ctx, ws...)
+		}
 		m, err := ModelOf(v)
 		if err != nil {
 			return errors.Errorf1From(
@@ -212,7 +244,7 @@ func (db *DB) Save(ctx context.Context, vs ...interface{}) error {
 				logger.Verbose1("one or more non-zero ID "+
 					"values.  Updating %v...", m)
 				ws = append(m.AppendValues(ws[:0]), ids...)
-				res, err := db.DB.ExecContext(
+				res, err := cmder.ExecContext(
 					ctx, t.sqlUpdate, ws...)
 				if err != nil {
 					return errors.Errorf2From(
@@ -245,11 +277,33 @@ func (db *DB) Save(ctx context.Context, vs ...interface{}) error {
 						"insert...")
 			}
 		}
-		_, err = t.insert(ctx, db, m)
+		_, err = t.insert(ctx, db, cmder, m)
 		if err != nil {
 			return errors.Errorf2From(
 				err, "error while inserting %v into %v", m, db)
 		}
+	}
+	return nil
+}
+
+// WithTx executes f with a *sql.Tx.  If there's already a transaction
+// associated with the context, f uses that transaction.  Otherwise a new one
+// is created and used.  If a new one was created and used, WithTx will commit
+// it.
+func (db *DB) WithTx(ctx context.Context, f func(ctx context.Context, tx *sql.Tx) error) (err error) {
+	tx, ok := TxFromContext(ctx)
+	if !ok {
+		tx, err = db.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return
+		}
+		ctx = AddTxToContext(ctx, tx)
+	}
+	if err := f(ctx, tx); err != nil {
+		return tx.Rollback()
+	}
+	if ok {
+		return tx.Commit()
 	}
 	return nil
 }
@@ -266,7 +320,7 @@ func cleanifaces(ifss ...[]interface{}) [][]interface{} {
 
 func (db *DB) getifaces() (ifs []interface{}) {
 	db.mu.Lock()
-	ifs = db.getifacesUnsafe()
+	ifs = db.getifacesLocked()
 	db.mu.Unlock()
 	if ifs == nil {
 		ifs = make([]interface{}, 0, 8)
@@ -274,11 +328,11 @@ func (db *DB) getifaces() (ifs []interface{}) {
 	return
 }
 
-func (db *DB) getifacesUnsafe() (ifs []interface{}) {
-	if len(db.ifacefree) > 0 {
-		i := len(db.ifacefree) - 1
-		ifs = db.ifacefree[i]
-		db.ifacefree = db.ifacefree[:i]
+func (db *DB) getifacesLocked() (ifs []interface{}) {
+	if len(db.freelists.ifaces) > 0 {
+		i := len(db.freelists.ifaces) - 1
+		ifs = db.freelists.ifaces[i]
+		db.freelists.ifaces = db.freelists.ifaces[:i]
 	}
 	return
 }
@@ -286,13 +340,13 @@ func (db *DB) getifacesUnsafe() (ifs []interface{}) {
 func (db *DB) putifaces(ifss ...[]interface{}) {
 	ifss = cleanifaces(ifss...)
 	db.mu.Lock()
-	db.ifacefree = append(db.ifacefree, ifss...)
+	db.freelists.ifaces = append(db.freelists.ifaces, ifss...)
 	db.mu.Unlock()
 }
 
-func (db *DB) putifacesUnsafe(ifss ...[]interface{}) {
+func (db *DB) putifacesLocked(ifss ...[]interface{}) {
 	ifss = cleanifaces(ifss...)
-	db.ifacefree = append(db.ifacefree, ifss...)
+	db.freelists.ifaces = append(db.freelists.ifaces, ifss...)
 }
 
 func cleanstrings(strss ...[]string) [][]string {
@@ -307,7 +361,7 @@ func cleanstrings(strss ...[]string) [][]string {
 
 func (db *DB) getstrings() (strs []string) {
 	db.mu.Lock()
-	strs = db.getstringsUnsafe()
+	strs = db.getstringsLocked()
 	db.mu.Unlock()
 	if strs == nil {
 		strs = make([]string, 0, 0)
@@ -315,12 +369,12 @@ func (db *DB) getstrings() (strs []string) {
 	return
 }
 
-func (db *DB) getstringsUnsafe() (strs []string) {
-	i := len(db.stringfree)
+func (db *DB) getstringsLocked() (strs []string) {
+	i := len(db.freelists.strs)
 	if i > 0 {
 		i--
-		strs = db.stringfree[i]
-		db.stringfree = db.stringfree[:i]
+		strs = db.freelists.strs[i]
+		db.freelists.strs = db.freelists.strs[:i]
 	}
 	return
 }
@@ -328,17 +382,17 @@ func (db *DB) getstringsUnsafe() (strs []string) {
 func (db *DB) putstrings(strss ...[]string) {
 	strss = cleanstrings(strss...)
 	db.mu.Lock()
-	db.putstringsUnsafe(strss...)
+	db.putstringsLocked(strss...)
 	db.mu.Unlock()
 }
 
-func (db *DB) putstringsUnsafe(strss ...[]string) {
-	db.stringfree = append(db.stringfree, strss...)
+func (db *DB) putstringsLocked(strss ...[]string) {
+	db.freelists.strs = append(db.freelists.strs, strss...)
 }
 
 type table struct {
 	sqlInsert  string
-	insertFunc func(t *table, ctx context.Context, db *DB, m Model) (ids Model, err error)
+	insertFunc func(t *table, ctx context.Context, db *DB, cmder sqlCmdImpl, m Model) (ids Model, err error)
 	sqlUpdate  string
 	// idColNum is the column number (index + 1) of the ID column in the
 	// table.  It's used to calculate which field to skip on inserts
@@ -353,13 +407,11 @@ type table struct {
 func (db *DB) getTable(v interface{}, m Model) *table {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	return db.getTableUnsafe(v, m)
+	return db.getTableLocked(v, m)
 }
 
-func (db *DB) getTableUnsafe(v interface{}, m Model) *table {
-	if ir, ok := v.(interface{ Interface() interface{} }); ok {
-		v = ir.Interface()
-	}
+func (db *DB) getTableLocked(v interface{}, m Model) *table {
+	v = interfaceOf(v)
 	tp := reflect.TypeOf(v)
 	t, ok := db.tables[tp]
 	if !ok {
@@ -367,15 +419,16 @@ func (db *DB) getTableUnsafe(v interface{}, m Model) *table {
 			goType: tp.Elem(),
 		}
 		db.tables[tp] = t
-		t.init(db, m, tp)
+		t.initWithUnsafeDB(db, m, tp)
 	}
 	return t
 }
 
-func (t *table) init(db *DB, m Model, tp reflect.Type) {
-	var v interface{} = m
-	if ir, ok := v.(interface{ Interface() interface{} }); ok {
-		v = ir.Interface()
+// init initializes a table within a DB.  This function must be run
+// while holding db's mutex.
+func (t *table) initWithUnsafeDB(db *DB, m Model, tp reflect.Type) {
+	v, ok := interfaceOf2(m)
+	if ok {
 		tp = reflect.TypeOf(v)
 	}
 	logger.Verbose1("creating table for type %v", tp)
@@ -384,12 +437,14 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 	} else {
 		t.rawName = tp.Elem().Name()
 	}
-	t.sqlName = db.dialect.Escape(db.tableNamer.Apply(DefaultCase.Parse(t.rawName)))
+	t.sqlName = db.dialect.Escape(
+		db.tableNamer.Apply(
+			DefaultCase.Parse(t.rawName)))
 	logger.Verbose3(
 		"name of table for type %v: (raw: %v, sql: %v)",
 		tp, t.rawName, t.sqlName)
-	fields := m.AppendFields(db.getifacesUnsafe())
-	names := m.AppendNames(make([]string, 0, len(fields)))
+	fields := m.AppendFields(db.getifacesLocked())
+	names := m.AppendNames(db.getstringsLocked())
 	sqlTypes := m.AppendSQLTypes(make([]sqltypes.Type, 0, len(fields)))
 	fieldNameToSQLName := make(map[string]string, len(names))
 	t.columns = make([]column, len(fields))
@@ -413,7 +468,7 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 		}
 		fieldNameToSQLName[names[i]] = sqlName
 	}
-	idNames := db.getstringsUnsafe()
+	idNames := db.getstringsLocked()
 	ids, ok := db.idOf(nopLocker{}, m)
 	if ok {
 		idNames = ids.AppendNames(idNames)
@@ -422,8 +477,8 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 	for _, n := range idNames {
 		idSet[n] = struct{}{}
 	}
-	sb := db.getstringsUnsafe()
-	defer db.putstringsUnsafe(idNames, sb)
+	sb := db.getstringsLocked()
+	defer db.putstringsLocked(idNames, sb)
 	defer cleanstrings(idNames, sb)
 	sb = append(sb, "INSERT INTO ", t.sqlName, " ( ")
 	var nameIndexSkipID int
@@ -440,7 +495,7 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 		sb = append(sb, fieldNameToSQLName[n])
 	}
 	sb = append(sb, " ) ")
-	if len(idNames) > 0 && db.dialect.DialectFlags().HasAll(DialectOutputInfix) {
+	if len(idNames) > 0 && db.dialect.Flags().HasAll(DialectOutputInfix) {
 		sb = append(sb, "OUTPUT ")
 		for i, name := range idNames {
 			if i > 0 {
@@ -458,7 +513,7 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 		delta++
 	}
 	sb = append(sb, "VALUES ( ", qmarkAndCommas[:(len(names)-delta)*3-2], " )")
-	if len(idNames) > 0 && db.dialect.DialectFlags().HasAll(DialectReturningSuffix) {
+	if len(idNames) > 0 && db.dialect.Flags().HasAll(DialectReturningSuffix) {
 		sb = append(sb, "RETURNING ")
 		for i, name := range idNames {
 			if i > 0 {
@@ -501,9 +556,9 @@ func (t *table) init(db *DB, m Model, tp reflect.Type) {
 	logger.Verbose1("initialized table: %#v", t)
 }
 
-func (t *table) insert(ctx context.Context, db *DB, m Model) (Model, error) {
+func (t *table) insert(ctx context.Context, db *DB, cmder sqlCmdImpl, m Model) (Model, error) {
 	logger.Verbose2("inserting %v into %v...", spew.Sdump(m), db)
-	ids, err := t.insertFunc(t, ctx, db, m)
+	ids, err := t.insertFunc(t, ctx, db, cmder, m)
 	logger.Verbose4(
 		"result of inserting %v into %v: (%v, %v)",
 		spew.Sdump(m), db, spew.Sdump(ids), err)
@@ -521,20 +576,20 @@ func deferredInsertError(p *error, m Model) {
 // insertQuery obtains the inserted ID(s) by executing the insert as a query
 // and selecting the results out via either the OUTPUT ... or RETURNING ...
 // parameters.
-func (t *table) insertQuery(ctx context.Context, db *DB, m Model) (ids Model, err error) {
+func (t *table) insertQuery(ctx context.Context, db *DB, cmder sqlCmdImpl, m Model) (ids Model, err error) {
 	defer deferredInsertError(&err, m)
 	ids, ok := db.IDOf(m)
 	if !ok {
 		return nil, errCannotDetermineID
 	}
 	logger.Verbose2("inserting %v with SQL:\n\t%v", m, t.sqlInsert)
-	err = db.DB.QueryRowContext(ctx, t.sqlInsert, m.AppendValues(nil)...).Scan(ids.AppendFields(nil))
+	err = cmder.QueryRowContext(ctx, t.sqlInsert, m.AppendValues(nil)...).Scan(ids.AppendFields(nil))
 	logger.Verbose1("insert result: %v", m)
 	return
 }
 
 // insertLastInsertID obtains the inserted result from res.LastInsertId
-func (t *table) insertLastInsertID(ctx context.Context, db *DB, m Model) (ids Model, err error) {
+func (t *table) insertLastInsertID(ctx context.Context, db *DB, cmder sqlCmdImpl, m Model) (ids Model, err error) {
 	defer deferredInsertError(&err, m)
 	vs := db.getifaces()
 	defer db.putifaces(vs)
@@ -563,7 +618,7 @@ func (t *table) insertLastInsertID(ctx context.Context, db *DB, m Model) (ids Mo
 	logger.Verbose3(
 		"inserting %v with SQL:\n\t%v\n\nArgs:\n\t%v",
 		m, t.sqlInsert, vs)
-	res, err := db.DB.ExecContext(ctx, t.sqlInsert, vs...)
+	res, err := cmder.ExecContext(ctx, t.sqlInsert, vs...)
 	if err != nil {
 		return nil, errors.Errorf2From(
 			err, "error while executing SQL:\n\n%s\n\nArgs:\n\n%v",

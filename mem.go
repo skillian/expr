@@ -22,8 +22,13 @@ func (e Mem) Operands() [2]Expr { return [2]Expr(e) }
 //
 // Looks like this here:
 //
-//	MemOf(x, &x, &x.Field)
+//	MemOf(x, &x, &x.Member)
 //
+// struc must be a pointer to a struct and field must be a pointer
+// to a field within that struct.  The only benefit this construct has
+// over passing the member name as a string is that if the struct field
+// is renamed, this will break at compile time instead of panicking at
+// runtime.
 func MemOf(source, struc, field interface{}) Mem {
 	rv := reflect.ValueOf(struc)
 	if rv.Kind() != reflect.Ptr {

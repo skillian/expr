@@ -10,9 +10,9 @@ import (
 // "streamlined"
 type Line interface {
 	Streamer
-	Filter(e expr.Expr) (Line, expr.Var)
-	Map(e expr.Expr) (Line, expr.Var)
-	Join(other Streamer, when, then expr.Expr) (Line, expr.Var)
+	Filter(e expr.Expr) Line
+	Map(e expr.Expr) Line
+	Join(other Streamer, when, then expr.Expr) Line
 }
 
 type line struct {
@@ -23,32 +23,36 @@ type line struct {
 var _ Line = line{}
 
 // LineOf creates a Line from a Streamer.
-func LineOf(s Streamer) Line {
-	return line{source: s}
+func LineOf(s Streamer, fs ...func(Line) Line) Line {
+	var ln Line = line{source: s}
+	for _, f := range fs {
+		ln = f(ln)
+	}
+	return ln
 }
 
-func (li line) Filter(e expr.Expr) (Line, expr.Var) {
+func (li line) Filter(e expr.Expr) Line {
 	if li.err != nil {
-		return li, li.Var()
+		return li
 	}
 	li.source, li.err = Filter(li.source, e)
-	return li, li.Var()
+	return li
 }
 
-func (li line) Join(other Streamer, when, then expr.Expr) (Line, expr.Var) {
+func (li line) Join(other Streamer, when, then expr.Expr) Line {
 	if li.err != nil {
-		return li, li.Var()
+		return li
 	}
 	li.source, li.err = Join(li.source, other, when, then)
-	return li, li.Var()
+	return li
 }
 
-func (li line) Map(e expr.Expr) (Line, expr.Var) {
+func (li line) Map(e expr.Expr) Line {
 	if li.err != nil {
-		return li, li.Var()
+		return li
 	}
 	li.source, li.err = Map(li.source, e)
-	return li, li.Var()
+	return li
 }
 
 func (li line) Stream(ctx context.Context) (Stream, error) {

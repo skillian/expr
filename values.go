@@ -2,6 +2,7 @@ package expr
 
 import (
 	"context"
+	"sync"
 
 	"github.com/skillian/expr/errors"
 )
@@ -30,12 +31,11 @@ var _ Values = (*valuesImpl)(nil)
 type valuesContextKey struct{}
 
 // AddValuesToContext adds the collection of values to the context.
-func AddValuesToContext(ctx context.Context, vs Values) (out context.Context, added bool) {
-	vs2, ok := ValuesFromContextOK(ctx)
-	if ok && vs2 == vs {
-		return ctx, false
+func AddValuesToContext(ctx context.Context, vs Values) context.Context {
+	if vs2, ok := ValuesFromContextOK(ctx); ok && vs2 == vs {
+		return ctx
 	}
-	return context.WithValue(ctx, valuesContextKey{}, vs), true
+	return context.WithValue(ctx, valuesContextKey{}, vs)
 }
 
 // ValuesFromContextOK attempts to retrieve the values out of a context and
@@ -52,6 +52,18 @@ func ValuesFromContext(ctx context.Context) (Values, error) {
 		return vs, nil
 	}
 	return nil, errors.Errorf1("failed to get values from context %+v", ctx)
+}
+
+// ValuesFromContextOrNew attempts to retrieve an existing collection of values
+// from a context or else creates a new collection and adds them to the
+// context.
+func ValuesFromContextOrNew(ctx context.Context) (context.Context, Values) {
+	vs, ok := ValuesFromContextOK(ctx)
+	if !ok {
+		vs = NewValues()
+		ctx = AddValuesToContext(ctx, vs)
+	}
+	return ctx, vs
 }
 
 // NewValues creates a new collection of values
@@ -108,3 +120,48 @@ var NoValues Values = noValues{}
 func (noValues) Len() int                 { return 0 }
 func (noValues) Get(v Var) interface{}    { return nil }
 func (noValues) Set(v Var, x interface{}) {}
+
+type concurrentValues struct {
+	locker
+	values Values
+}
+
+// ConcurrentValues creates a collection of values safe for concurrent use.
+func ConcurrentValues(lr sync.Locker, pairs ...VarValuePair) Values {
+	return concurrentValues{lockerOf(lr), NewValues(pairs...)}
+}
+
+func (vs concurrentValues) Get(v Var) (x interface{}) {
+	vs.locker.RLock()
+	x = vs.values.Get(v)
+	vs.locker.RUnlock()
+	return
+}
+
+func (vs concurrentValues) Len() int { return vs.values.Len() }
+
+func (vs concurrentValues) Set(v Var, x interface{}) {
+	vs.locker.Lock()
+	vs.values.Set(v, x)
+	vs.locker.Unlock()
+}
+
+type locker interface {
+	sync.Locker
+	RLock()
+	RUnlock()
+}
+
+func lockerOf(s sync.Locker) locker {
+	if lr, ok := s.(locker); ok {
+		return lr
+	}
+	return dummyRlocker{s}
+}
+
+type dummyRlocker struct {
+	sync.Locker
+}
+
+func (d dummyRlocker) RLock()   { d.Locker.Lock() }
+func (d dummyRlocker) RUnlock() { d.Locker.Unlock() }
