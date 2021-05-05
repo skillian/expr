@@ -1,0 +1,26 @@
+	public struct {{.PK.ModelName}} : IId<{{basemodeltype .PK.Column.Type}}, {{.ModelName}}>
+	{
+		private readonly {{basemodeltype .PK.Column.Type}} value;
+
+		public {{.PK.ModelName}}({{basemodeltype .PK.Column.Type}} value)
+		{
+			this.value = value;
+		}
+
+		private static readonly Func<{{basemodeltype .PK.Column.Type}}, {{basemodeltype .PK.Column.Type}}, bool> idValueEquals
+			= System.Collections.Generic.EqualityComparer<{{basemodeltype .PK.Column.Type}}>.Default.Equals;
+
+		public static bool operator==({{.PK.ModelName}} a, {{.PK.ModelName}} b) => idValueEquals(a.value, b.value);
+		public static bool operator!=({{.PK.ModelName}} a, {{.PK.ModelName}} b) => !(a == b);
+
+		public override bool Equals(object obj)
+		{
+			if (obj is {{.PK.ModelName}} id)
+				return this == id;
+
+			return false;
+		}
+
+		public override int GetHashCode() => value?.GetHashCode() ?? 0;
+		public override string ToString() => value?.ToString();
+	}

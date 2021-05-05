@@ -1,0 +1,9 @@
+{{if .PK}}{{template "id.txt" .}}
+{{else if .Key}}{{template "key.txt" .}}
+{{end}}
+	public partial class {{.ModelName}}
+	{
+{{if .PK}}		public {{.PK.ModelName}}{{if isnullable .PK.Column.Type}}?{{end}} {{.PK.ModelName}} { get; set; }
+{{else if .Key}}		public {{.Key.ModelName}} {{.Key.ModelName}} { get; set; }
+{{end}}{{range .Columns}}{{if (not .PK)}}		public {{if .FK}}{{.FK.ModelName}}{{else}}{{modeltype .Type}}{{end}} {{.ModelName}} { get; set; }
+{{end}}{{end}}	}
