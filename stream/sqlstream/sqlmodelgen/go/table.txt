@@ -2,7 +2,7 @@
 	Value {{modeltype .PK.Column.Type}}
 }
 
-func (id {{.PK.ModelName}}) AppendFields(fs []interface{}) []interface{} {
+func (id *{{.PK.ModelName}}) AppendFields(fs []interface{}) []interface{} {
 	return append(fs, &id.Value)
 }
 
@@ -18,11 +18,11 @@ func (id {{.PK.ModelName}}) AppendSQLTypes(ts []sqltypes.SQLType) []sqltypes.SQL
 	return append(ts, {{printf "%#v" .PK.Column.Type}})
 }
 
-{{end}}{{if .Key}}type {{.Key.ModelName}} {
+{{else if .Key}}type {{.Key.ModelName}} {
 {{range .Key.IDs}}	{{.ModelName}} {{modeltype .Column.Type}}
 {{end}}}
 
-func (key {{.Key.ModelName}}) AppendFields(fs []interface{}) []interface{} {
+func (key *{{.Key.ModelName}}) AppendFields(fs []interface{}) []interface{} {
 	return append(fs{{range .Key.IDs}}, &key.{{.ModelName}}{{end}})
 }
 
@@ -39,20 +39,20 @@ func (key {{.Key.ModelName}}) AppendValues(vs []interface{}) []interface{} {
 }
 
 func (key {{.Key.ModelName}}) AppendSQLTypes(ts []sqltypes.SQLType) []sqltypes.SQLType {
-	return append(ts{{range .Key.IDs}}, {{modeltype .Column.Type}}{{end}})
+	return append(ts{{range .Key.IDs}}, {{printf "%#v" .Type}}{{end}})
 }
 
 {{end}}type {{.ModelName}} struct {
 {{if .PK}}	{{.PK.ModelName}}
-{{end}}{{if .Key}}	{{.Key.ModelName}}
+{{else if .Key}}	{{.Key.ModelName}}
 {{end}}{{range .Columns}}{{if (not .PK)}}	{{.ModelName}} {{if .FK}}{{.FK.ModelName}}{{else}}{{modeltype .Type}}{{end}}{{end}}{{end}}
 }
 
-func (m {{.ModelName}}) AppendFields(fs []interface{}) []interface{} {
+func (m *{{.ModelName}}) AppendFields(fs []interface{}) []interface{} {
 {{if .PK}}	fs = m.{{.PK.ModelName}}.AppendFields(fs)
-{{end}}{{if .Key}}	fs = m.{{.Key.ModelName}}.AppendFields(fs)
+{{else if .Key}}	fs = m.{{.Key.ModelName}}.AppendFields(fs)
 {{end}}{{range .Columns}}{{if .FK}}	fs = m.{{.ModelName}}.AppendFields(fs)
-{{end}}{{end}}{{/* This line is still generated even if there are no non-ID columns */}}	return append(fs{{range .Columns}}{{if and (not .PK) (not .FK)}}, &m.{{.ModelName}}{{end}}{{end}})
+{{end}}{{end}}{{if .DataColumns}}	return append(fs{{range .DataColumns}}, &m.{{.ModelName}}{{end}}){{else}}	return fs{{end}}
 }
 
 var namesOf{{.ModelName}}NonKeyOrIDFields = []string{
@@ -68,12 +68,19 @@ func (m {{.ModelName}}) AppendNames(ns []string) []string {
 
 func (m {{.ModelName}}) AppendValues(vs []interface{}) []interface{} {
 {{if .PK}}	vs = m.{{.PK.ModelName}}.AppendValues(vs)
-{{end}}{{if .Key}}	vs = m.{{.Key.ModelName}}.AppendValues(vs)
-{{end}}{{/* This line is still generated even if there are no non-ID columns */}}	return append(vs{{range .Columns}}{{if (not .PK)}}, m.{{.ModelName}}{{end}})
-{{end}}}
+{{else if .Key}}	vs = m.{{.Key.ModelName}}.AppendValues(vs)
+{{end}}{{range .Columns}}{{if .FK}}	vs = m.{{.ModelName}}.AppendValues(vs)
+{{end}}{{end}}{{if .DataColumns}}	return append(vs{{range .DataColumns}}, m.{{.ModelName}}{{end}}){{else}}	return vs{{end}}
+}
 
 func (m {{.ModelName}}) AppendSQLTypes(ts []sqltypes.SQLType) []sqltypes.SQLType {
 {{if .PK}}	ts = m.{{.PK.ModelName}}.AppendSQLTypes(ts)
-{{end}}{{if .Key}}	ts = m.{{.Key.ModelName}}.AppendSQLTypes(ts)
-{{end}}{{/* This line is still generated even if there are no non-ID columns */}}	return append(ts{{range .Columns}}{{if (not .PK)}}, {{modeltype .Type}}{{end}}{{end}})
-}
+{{else if .Key}}	ts = m.{{.Key.ModelName}}.AppendSQLTypes(ts)
+{{end}}{{range .Columns}}{{if .FK}}	ts = m.{{.ModelName}}.AppendSQLTypes(ts){{end}}{{end}}
+{{if .DataColumns}}	return append(ts{{range .DataColumns}}, {{printf "%#v" .Type}}{{end}}){{else}}	return ts{{end}}
+}{{if or .PK .Key}}
+
+func (m *{{.ModelName}}) ID() sqlstream.Model {
+	return &m.{{if .PK}}{{.PK.ModelName}}{{else}}{{.Key.ModelName}}{{end}}
+}{{end}}
+

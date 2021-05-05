@@ -1,6 +1,7 @@
 package sqlmodelgen
 
 import (
+	"io"
 	"strings"
 	"text/template"
 
@@ -61,5 +62,14 @@ func AddFuncs(t *template.Template, m template.FuncMap, mc ModelContext) *templa
 			return
 		})
 	}
+	add(m, "isnullable", sqltypes.IsNullable)
+	add(m, "basemodeltype", func(t sqltypes.Type) (name string, err error) {
+		_ = sqltypes.IterInners(t, func(x sqltypes.Type) error {
+			t = x
+			return io.EOF
+		})
+		_, name, err = mc.ModelType(t)
+		return
+	})
 	return t
 }

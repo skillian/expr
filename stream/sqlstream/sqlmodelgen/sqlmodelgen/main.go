@@ -28,7 +28,7 @@ var (
 )
 
 type Args struct {
-	LogLevel logging.Level
+	LogLevel     logging.Level
 	ConfigFile   string
 	ModelFile    string
 	ModelContext sqlmodelgen.ModelContext
@@ -68,7 +68,7 @@ func main() {
 			},
 			argparse.Choice{
 				Key:   "cs",
-				Value: nil, // TODO
+				Value: sqlmodelgen.CSModelContext,
 			},
 		),
 	).MustBind(&args.ModelContext)
@@ -153,8 +153,8 @@ func Main(args Args) (Err error) {
 			)
 		}
 	}
-	if logger.Level() <= logging.DebugLevel {
-		logger.Debug("configuration:\n\n%v", spew.Sdump(cfg))
+	if logger.Level() <= logging.VerboseLevel {
+		logger.Verbose("configuration:\n\n%v", spew.Sdump(cfg))
 	}
 	defer errors.Catch(&Err, out.Close)
 	if err = t.ExecuteTemplate(out, "0root.txt", cfg); err != nil {

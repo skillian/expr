@@ -1,7 +1,7 @@
 package {{.Namespace}}
-{{if gt (len .Namespaces) 0}}
+{{if .Namespaces}}
 import (
-{{range .Namespaces}}{{if .}}	"${{.}}"{{end}}
+{{range .Namespaces}}{{if .}}	"{{.}}"{{end}}
 {{end}})
 {{end}}
 {{range .Databases}}{{template "database.txt" .}}{{end}}

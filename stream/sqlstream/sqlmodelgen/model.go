@@ -65,6 +65,10 @@ var namersByName = map[string]sqlstream.Namer{
 	"snakecase":  sqlstream.SnakeCase,
 }
 
+type idNamer struct{}
+
+func (idNamer) Parse(s string)
+
 func (nrs *Namers) init(c *config.Namers) error {
 	nr, ok := namersByName[c.SQLNamer]
 	if !ok {
@@ -140,6 +144,11 @@ type Table struct {
 	// Key is non-nil if the table has a composite key.
 	// If Key is not nil, PK is nil.
 	Key *TableKey
+
+	// DataColumns are any non-ID and non-Key columns.  Referencing
+	// these columns from here instead of checking if columns are PK
+	// or Keys results in less logic in the templates.
+	DataColumns []*Column
 }
 
 type TableID struct {
@@ -248,6 +257,98 @@ func (b *configBuilder) init(c *config.Config) (err error) {
 			}
 		}
 	}
+	if err = b.iterDBSchemaTableColumn(c, func(
+		dbName string, dbCfg config.Database, db *Database,
+		schName string, schCfg config.Schema, schema *Schema,
+		tblName string, tblCfg config.Table, table *Table,
+		colName string, colCfg config.Column, column *Column,
+	) error {
+		if colCfg.FK == "" {
+			return nil
+		}
+		fkTrg, err := b.getPathUp(colCfg.FK, table)
+		if err != nil {
+			return errors.ErrorfFrom(
+				err, "failed to initialize column %v.%v.%v.%v FK",
+				dbName, schName, tblName, colName,
+			)
+		}
+		fkCol, ok := fkTrg.(*Column)
+		if !ok {
+			return errors.Errorf(
+				"column %v.%v.%v.%v FK target is not a column",
+				dbName, schName, tblName, colName,
+			)
+		}
+		fkTbl := fkCol.Table
+		if fkTbl.PK != nil && fkTbl.PK.Column == fkCol {
+			column.FK = fkTbl.PK
+		} else if fkTbl.Key != nil {
+			for _, id := range fkTbl.Key.IDs {
+				if id.Column == fkCol {
+					column.FK = id
+					break
+				}
+			}
+		}
+		if column.FK == nil {
+			return errors.Errorf(
+				"column %q is not key within primary table %q",
+				fkCol.RawName, fkCol.Table.RawName)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err = b.iterDBSchemaTableColumn(c, func(
+		dbName string, dbCfg config.Database, db *Database,
+		schName string, schCfg config.Schema, schema *Schema,
+		tblName string, tblCfg config.Table, table *Table,
+		colName string, colCfg config.Column, column *Column,
+	) error {
+		if column.PK {
+			return nil
+		}
+		if column.FK != nil {
+			return nil
+		}
+		if table.Key != nil {
+			for _, id := range table.Key.IDs {
+				if id.Column == column {
+					return nil
+				}
+			}
+		}
+		table.DataColumns = append(table.DataColumns, column)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if ens, ok := b.ModelContext.(NamespaceEnsurer); ok {
+		for _, ns := range ens.EnsureNamespaces(b.Config) {
+			if ns == "" {
+				continue
+			}
+			b.namespaces[ns] = struct{}{}
+		}
+	}
+	b.Config.Namespaces = make([]string, 0, internal.CapForLen(len(b.namespaces)))
+	for ns := range b.namespaces {
+		b.Config.Namespaces = append(b.Config.Namespaces, ns)
+	}
+	logger.Debug1("namespaces: %+v", b.Config.Namespaces)
+	if org, ok := b.ModelContext.(NamespaceOrganizer); ok {
+		b.Config.Namespaces = org.OrganizeNamespaces(b.Config.Namespaces)
+	}
+	return
+}
+
+func (b *configBuilder) iterDBSchemaTableColumn(c *config.Config, f func(
+	dbName string, dbCfg config.Database, db *Database,
+	schName string, schCfg config.Schema, schema *Schema,
+	tblName string, tblCfg config.Table, table *Table,
+	colName string, colCfg config.Column, column *Column,
+) error) error {
 	for dbName, dbCfg := range c.Databases {
 		db := b.Config.DatabasesByName[dbName]
 		for schName, schCfg := range dbCfg.Schemas {
@@ -256,50 +357,19 @@ func (b *configBuilder) init(c *config.Config) (err error) {
 				table := schema.TablesByName[tblName]
 				for colName, colCfg := range tblCfg.Columns {
 					column := table.ColumnsByName[colName]
-					if colCfg.FK != "" {
-						fkTrg, err := b.getPathUp(colCfg.FK, table)
-						if err != nil {
-							return errors.ErrorfFrom(
-								err, "failed to initialize column %v.%v.%v.%v FK",
-								dbName, schName, tblName, colName,
-							)
-						}
-						fkCol, ok := fkTrg.(*Column)
-						if !ok {
-							return errors.Errorf(
-								"column %v.%v.%v.%v FK target is not a column",
-								dbName, schName, tblName, colName,
-							)
-						}
-						fkTbl := fkCol.Table
-						if fkTbl.PK != nil && fkTbl.PK.Column == fkCol {
-							column.FK = fkTbl.PK
-						} else if fkTbl.Key != nil {
-							for _, id := range fkTbl.Key.IDs {
-								if id.Column == fkCol {
-									column.FK = id
-									break
-								}
-							}
-						}
-						if column.FK == nil {
-							return errors.Errorf(
-								"column %q is not key within primary table %q",
-								fkCol.RawName, fkCol.Table.RawName)
-						}
+					if err := f(
+						dbName, dbCfg, db,
+						schName, schCfg, schema,
+						tblName, tblCfg, table,
+						colName, colCfg, column,
+					); err != nil {
+						return err
 					}
 				}
 			}
 		}
 	}
-	b.Config.Namespaces = make([]string, 0, internal.CapForLen(len(b.namespaces)))
-	for ns := range b.namespaces {
-		b.Config.Namespaces = append(b.Config.Namespaces, ns)
-	}
-	if org, ok := b.ModelContext.(NamespaceOrganizer); ok {
-		b.Config.Namespaces = org.OrganizeNamespaces(b.Config.Namespaces)
-	}
-	return
+	return nil
 }
 
 func (b *configBuilder) getPathUp(path string, start *Table) (interface{}, error) {

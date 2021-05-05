@@ -17,6 +17,13 @@ type ModelContext interface {
 	FS() fs.FS
 }
 
+// NamespaceEnsurer is an optional interface that ModelContexts can implement
+// to inspect the initialized configuration and return namespaces that must
+// exist in the generated templates.
+type NamespaceEnsurer interface {
+	EnsureNamespaces(c *Config) []string
+}
+
 // NamespaceOrganizer is an optional interface that ModelContexts can implement
 // to organize the namespaces of the files they generate (e.g. sort them,
 // group them, etc.)

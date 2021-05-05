@@ -70,6 +70,23 @@ func (goModelContext) ModelType(t sqltypes.Type) (namespace, typename string, er
 	return "", "interface{}", nil
 }
 
+func (goModelContext) EnsureNamespaces(c *Config) []string {
+	nss := make([]string, 1, 2)
+	nss[0] = "github.com/skillian/expr/stream/sqlstream/sqltypes"
+dbLoop:
+	for _, db := range c.Databases {
+		for _, sch := range db.Schemas {
+			for _, tbl := range sch.Tables {
+				if tbl.PK != nil || tbl.Key != nil {
+					nss = append(nss, "github.com/skillian/expr/stream/sqlstream")
+					break dbLoop
+				}
+			}
+		}
+	}
+	return nss
+}
+
 func (goModelContext) OrganizeNamespaces(nss []string) []string {
 	stdlib := make([]string, 0, len(nss))
 	external := make([]string, 0, len(nss))
@@ -90,11 +107,13 @@ func (goModelContext) OrganizeNamespaces(nss []string) []string {
 	}
 	sort.Strings(stdlib)
 	sort.Strings(external)
+	nss = nss[:0]
 	if len(stdlib) > 0 {
-		nss = append(nss[:0], stdlib...)
+		nss = append(nss, stdlib...)
 		if len(external) > 0 {
 			nss = append(nss, "") // gap
 		}
 	}
 	return append(nss, external...)
 }
+
