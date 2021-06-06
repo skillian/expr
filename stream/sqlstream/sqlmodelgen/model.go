@@ -65,9 +65,7 @@ var namersByName = map[string]sqlstream.Namer{
 	"snakecase":  sqlstream.SnakeCase,
 }
 
-type idNamer struct{}
-
-func (idNamer) Parse(s string)
+// TODO: Change Namer to accept a context
 
 func (nrs *Namers) init(c *config.Namers) error {
 	nr, ok := namersByName[c.SQLNamer]
@@ -217,13 +215,15 @@ func (b *configBuilder) init(c *config.Config) (err error) {
 					t.Columns = append(t.Columns, c)
 					t.ColumnsByName[colName] = c
 					c.PK = colCfg.PK
-					c.Type, err = sqltypes.Parse(colCfg.Type)
-					if err != nil {
-						return errors.ErrorfFrom(
-							err,
-							"column %s.%s.%s.%s has an invalid Type",
-							dbName, schName, tblName, colName,
-						)
+					if colCfg.Type != "" {
+						c.Type, err = sqltypes.Parse(colCfg.Type)
+						if err != nil {
+							return errors.ErrorfFrom(
+								err,
+								"column %s.%s.%s.%s has an invalid Type",
+								dbName, schName, tblName, colName,
+							)
+						}
 					}
 					ns, _, err := b.ModelType(c.Type)
 					if err != nil {
@@ -283,10 +283,16 @@ func (b *configBuilder) init(c *config.Config) (err error) {
 		fkTbl := fkCol.Table
 		if fkTbl.PK != nil && fkTbl.PK.Column == fkCol {
 			column.FK = fkTbl.PK
+			if column.Type == nil {
+				column.Type = fkTbl.PK.Column.Type
+			}
 		} else if fkTbl.Key != nil {
 			for _, id := range fkTbl.Key.IDs {
 				if id.Column == fkCol {
 					column.FK = id
+					if column.Type == nil {
+						column.Type = id.Column.Type
+					}
 					break
 				}
 			}
@@ -393,19 +399,20 @@ func (b *configBuilder) getPathUp(path string, start *Table) (interface{}, error
 func (b *configBuilder) getPathDown(path string, start interface{}) (interface{}, error) {
 	parts := strings.Split(path, ".")
 	hop := start
+	var ok bool
 	for len(parts) > 0 {
 		last := hop
 		name := parts[0]
 		parts = parts[1:]
 		switch x := hop.(type) {
 		case *Config:
-			hop = x.DatabasesByName[name]
+			hop, ok = x.DatabasesByName[name]
 		case *Database:
-			hop = x.SchemasByName[name]
+			hop, ok = x.SchemasByName[name]
 		case *Schema:
-			hop = x.TablesByName[name]
+			hop, ok = x.TablesByName[name]
 		case *Table:
-			hop = x.ColumnsByName[name]
+			hop, ok = x.ColumnsByName[name]
 		default:
 			return nil, errors.Errorf(
 				"cannot get %[1]q from %[2]v "+
@@ -413,6 +420,12 @@ func (b *configBuilder) getPathDown(path string, start interface{}) (interface{}
 					"(type: %[3]T) has no %[4]q "+
 					"member",
 				path, last, hop, name)
+		}
+		if !ok {
+			return nil, errors.Errorf(
+				"failed to get %q from %v",
+				name, last,
+			)
 		}
 	}
 	return hop, nil
@@ -461,7 +474,7 @@ func (b *configBuilder) newKey(t *Table, ids []*TableID) (key *TableKey) {
 	}
 	key = &b.caches.keys[0]
 	b.caches.keys = b.caches.keys[1:]
-	key.Names.init(t.RawName, &t.Database.Namers.Key)
+	key.Names.init(t.RawName + "Key", &t.Database.Namers.Key)
 	key.IDs = b.newIDs(ids)
 	return
 }

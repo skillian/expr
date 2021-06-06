@@ -154,15 +154,16 @@ func removeSuffix(v, suffix string) (value string, ok bool) {
 // Nullable can wrap a type definition to make the definition nullable
 type Nullable [1]Type
 
+var isNullable error = &internal.Sentinel{}
+
 // IsNullable checks if the type is nullable
 func IsNullable(t Type) (ok bool) {
-	var s internal.Sentinel
 	return IterInners(t, func(t Type) error {
 		if _, ok = t.(Nullable); ok {
-			return &s
+			return isNullable
 		}
 		return nil
-	}) == &s
+	}) == isNullable
 }
 
 // IterInners digs into the innermost type and then calls f on each type as it

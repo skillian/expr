@@ -34,6 +34,9 @@ func NewQueryOptions(options ...QueryOption) (*QueryOptions, error) {
 // Limit defines the number of results to limit.
 func (q *QueryOptions) Limit() (value int64, hasValue bool) { return q.limit, q.limit > 0 }
 
+// CustomData returns optional custom data specific to a query implementation
+func (q *QueryOptions) CustomData() interface{} { return q.customData }
+
 // QueryOption configures a query option
 type QueryOption func(q *QueryOptions) error
 

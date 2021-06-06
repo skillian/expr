@@ -1,15 +1,15 @@
-{{if .PK}}type {{.PK.ModelName}} {
+{{if .PK}}type {{.PK.ModelName}} struct {
 	Value {{modeltype .PK.Column.Type}}
 }
 
 func (id *{{.PK.ModelName}}) AppendFields(fs []interface{}) []interface{} {
 	return append(fs, &id.Value)
 }
-
+/*
 func (id {{.PK.ModelName}}) AppendNames(ns []string) []string {
 	return append(ns, "{{.PK.SQLName}}")
 }
-
+*/
 func (id {{.PK.ModelName}}) AppendValues(vs []interface{}) []interface{} {
 	return append(vs, id.Value)
 }
@@ -19,11 +19,12 @@ func (id {{.PK.ModelName}}) AppendSQLTypes(ts []sqltypes.SQLType) []sqltypes.SQL
 }
 
 {{else if .Key}}type {{.Key.ModelName}} {
-{{range .Key.IDs}}	{{.ModelName}} {{modeltype .Column.Type}}
+{{range .Key.IDs}}	{{.ModelName}} {{.ModelName}}
 {{end}}}
 
 func (key *{{.Key.ModelName}}) AppendFields(fs []interface{}) []interface{} {
-	return append(fs{{range .Key.IDs}}, &key.{{.ModelName}}{{end}})
+{{range .Key.IDs}}	fs = key.{{.ModelName}}.AppendFields(fs)
+{{end}}	return fs
 }
 
 var namesOf{{.Key.ModelName}}Fields = []string {
@@ -39,15 +40,23 @@ func (key {{.Key.ModelName}}) AppendValues(vs []interface{}) []interface{} {
 }
 
 func (key {{.Key.ModelName}}) AppendSQLTypes(ts []sqltypes.SQLType) []sqltypes.SQLType {
-	return append(ts{{range .Key.IDs}}, {{printf "%#v" .Type}}{{end}})
+	return append(ts{{range .Key.IDs}}, {{printf "%#v" .Column.Type}}{{end}})
 }
 
 {{end}}type {{.ModelName}} struct {
 {{if .PK}}	{{.PK.ModelName}}
 {{else if .Key}}	{{.Key.ModelName}}
-{{end}}{{range .Columns}}{{if (not .PK)}}	{{.ModelName}} {{if .FK}}{{.FK.ModelName}}{{else}}{{modeltype .Type}}{{end}}{{end}}{{end}}
+{{end}}{{range .Columns}}{{if (not .PK)}}	{{.ModelName}} {{if .FK}}{{.FK.ModelName}}{{else}}{{modeltype .Type}}{{end}}
+{{end}}{{end}}}
+{{if .PK}}
+func (m *{{.ModelName}}) ID() sqlstream.Model {
+	return sqlstream.ModelWithName(&m.{{.PK.ModelName}}, "{{.PK.SQLName}}")
 }
-
+{{else if .Key}}
+func (m *{{.ModelName}}) ID() sqlstream.Model {
+	return sqlstream.ModelWithName(&m.{{.Key.ModelName}}{{range .Key.IDs}}, "{{.SQLName}}"{{end}})
+}
+{{end}}
 func (m *{{.ModelName}}) AppendFields(fs []interface{}) []interface{} {
 {{if .PK}}	fs = m.{{.PK.ModelName}}.AppendFields(fs)
 {{else if .Key}}	fs = m.{{.Key.ModelName}}.AppendFields(fs)
@@ -55,15 +64,16 @@ func (m *{{.ModelName}}) AppendFields(fs []interface{}) []interface{} {
 {{end}}{{end}}{{if .DataColumns}}	return append(fs{{range .DataColumns}}, &m.{{.ModelName}}{{end}}){{else}}	return fs{{end}}
 }
 
-var namesOf{{.ModelName}}NonKeyOrIDFields = []string{
-{{range .Columns}}{{if and (not .PK) (not .FK)}}	"{{.SQLName}}",
-{{end}}{{end}}}
+var namesOf{{.ModelName}}Fields = []string{
+{{range .Columns}}	"{{.SQLName}}",
+{{end}}}
 
 func (m {{.ModelName}}) AppendNames(ns []string) []string {
-{{if .PK}}	ns = m.{{.PK.ModelName}}.AppendNames(ns)
+/*{{if .PK}}	ns = m.{{.PK.ModelName}}.AppendNames(ns)
 {{end}}{{if .Key}}	ns = m.{{.Key.ModelName}}.AppendNames(ns)
 {{end}}{{range .Columns}}{{if .FK}}	ns = m.{{.ModelName}}.AppendNames(ns)
-{{end}}{{end}}{{/* This line is still generated even if there are no non-ID columns */}}	return append(ns, namesOf{{.ModelName}}NonKeyOrIDFields...)
+{{end}}{{end}}	return append(ns, namesOf{{.ModelName}}NonKeyOrIDFields...)*/
+	return append(ns, namesOf{{.ModelName}}Fields...)
 }
 
 func (m {{.ModelName}}) AppendValues(vs []interface{}) []interface{} {
@@ -76,11 +86,7 @@ func (m {{.ModelName}}) AppendValues(vs []interface{}) []interface{} {
 func (m {{.ModelName}}) AppendSQLTypes(ts []sqltypes.SQLType) []sqltypes.SQLType {
 {{if .PK}}	ts = m.{{.PK.ModelName}}.AppendSQLTypes(ts)
 {{else if .Key}}	ts = m.{{.Key.ModelName}}.AppendSQLTypes(ts)
-{{end}}{{range .Columns}}{{if .FK}}	ts = m.{{.ModelName}}.AppendSQLTypes(ts){{end}}{{end}}
-{{if .DataColumns}}	return append(ts{{range .DataColumns}}, {{printf "%#v" .Type}}{{end}}){{else}}	return ts{{end}}
-}{{if or .PK .Key}}
-
-func (m *{{.ModelName}}) ID() sqlstream.Model {
-	return &m.{{if .PK}}{{.PK.ModelName}}{{else}}{{.Key.ModelName}}{{end}}
-}{{end}}
+{{end}}{{range .Columns}}{{if .FK}}	ts = m.{{.ModelName}}.AppendSQLTypes(ts)
+{{end}}{{end}}{{if .DataColumns}}	return append(ts{{range .DataColumns}}, {{printf "%#v" .Type}}{{end}}){{else}}	return ts{{end}}
+}
 

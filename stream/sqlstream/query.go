@@ -38,6 +38,9 @@ func (db *DB) Query(ctx context.Context, v interface{}, options ...stream.QueryO
 }
 
 type query struct {
+	// base is the query that this query was made from (or a pointer to
+	// itself).  It's needed so that variables created from other queries
+	// still work.
 	base *query
 	dbcmd
 	from *table
@@ -93,7 +96,7 @@ func (q *query) clone() *query {
 	return q2
 }
 
-func (q *query) checkVars(e expr.Expr, what string) (local bool) {
+func (q *query) requiresLocal(e expr.Expr, what string) bool {
 	// invert the result of Inspect.
 	return !expr.Inspect(e, func(e expr.Expr) bool {
 		const prefix = "Using local %s because "
@@ -121,7 +124,7 @@ func (q *query) checkVars(e expr.Expr, what string) (local bool) {
 }
 
 func (q *query) Filter(e expr.Expr) (stream.Streamer, error) {
-	if q.checkVars(e, "filter") {
+	if q.requiresLocal(e, "filter") {
 		return stream.NewLocalFilter(q, e)
 	}
 	if q.where != nil {
@@ -134,7 +137,7 @@ func (q *query) Filter(e expr.Expr) (stream.Streamer, error) {
 
 func (q *query) Join(other stream.Streamer, when, then expr.Expr, options ...stream.JoinOption) (stream.Streamer, error) {
 	oq, ok := other.(*query)
-	if !ok || q.checkVars(when, "join") || q.checkVars(then, "join") {
+	if !ok || q.requiresLocal(when, "join") || q.requiresLocal(then, "join") {
 		return stream.NewLocalJoiner(q, other, when, then)
 	}
 	q2 := q.clone()

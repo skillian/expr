@@ -1,7 +1,19 @@
 package {{.Namespace}}
-{{if .Namespaces}}
+
 import (
+	"github.com/skillian/expr/stream/sqlstream/sqlmodels"
 {{range .Namespaces}}{{if .}}	"{{.}}"{{end}}
 {{end}})
+
+var Config *sqlmodels.Config = func() *sqlmodels.Config {
+	dbs := make([]sqlmodels.Database, {{len .Databases}})
+	cfg := &sqlmodels.Config{
+		Databases: make([]*Database, {{len .Databases}}),
+		DatabasesByName: make(map[string]*Database, {{len .Databases}}),
+	}
+{{range $DatabaseIndex, $Database := .Databases}}	cfg.Databases[{{$DatabaseIndex}}] = &dbs[{{$DatabaseIndex}}]
+	cfg.DatabasesByName[{{$Database.ModelName}}] = &dbs[{{$DatabaseIndex}}]
 {{end}}
+}()
+
 {{range .Databases}}{{template "database.txt" .}}{{end}}

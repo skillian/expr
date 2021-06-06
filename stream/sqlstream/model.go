@@ -51,6 +51,27 @@ type sqlTypesAppender interface {
 	AppendSQLTypes(ts []sqltypes.Type) []sqltypes.Type
 }
 
+type UnnamedModel interface {
+	fieldsAppender
+	valuesAppender
+	sqlTypesAppender
+}
+
+// ModelWithNames creates a model from a type that implements
+// the model interface except for AppendNames
+func ModelWithNames(m UnnamedModel, names ...string) Model {
+	return unnamedModel{m, names}
+}
+
+type unnamedModel struct {
+	UnnamedModel
+	names []string
+}
+
+func (um unnamedModel) AppendNames(ns []string) []string {
+	return append(ns, um.names...)
+}
+
 // Model describes rows of data, such as those returned from tables, views,
 // stored procedures, functions, etc.
 //

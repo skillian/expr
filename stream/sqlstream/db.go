@@ -75,7 +75,7 @@ func NewDB(sqlDB *sql.DB, options ...DBOption) (*DB, error) {
 	if db.dialect == nil {
 		logger.Error(
 			"No dialect was specified and it is required.  It " +
-				"may be possible to automatically determine a" +
+				"may be possible to automatically determine a " +
 				"default dialect based on the driver in the " +
 				"future (which is why the dialect is not " +
 				"passed explicitly), but for now, it must be " +
@@ -220,12 +220,17 @@ func (db *DB) Save(ctx context.Context, vs ...interface{}) error {
 	for _, v := range vs {
 		switch v := v.(type) {
 		case []interface{}:
-			return db.Save(ctx, v...)
+			if err := db.Save(ctx, v...); err != nil {
+				return err
+			}
 		case []Model:
 			for _, x := range v {
 				ws = append(ws, x)
 			}
-			return db.Save(ctx, ws...)
+			if err := db.Save(ctx, ws...); err != nil {
+				return err
+			}
+			ws = ws[:0]
 		}
 		m, err := ModelOf(v)
 		if err != nil {
@@ -291,8 +296,8 @@ func (db *DB) Save(ctx context.Context, vs ...interface{}) error {
 // is created and used.  If a new one was created and used, WithTx will commit
 // it.
 func (db *DB) WithTx(ctx context.Context, f func(ctx context.Context, tx *sql.Tx) error) (err error) {
-	tx, ok := TxFromContext(ctx)
-	if !ok {
+	tx, borrowed := TxFromContext(ctx)
+	if !borrowed {
 		tx, err = db.DB.BeginTx(ctx, nil)
 		if err != nil {
 			return
@@ -302,7 +307,7 @@ func (db *DB) WithTx(ctx context.Context, f func(ctx context.Context, tx *sql.Tx
 	if err := f(ctx, tx); err != nil {
 		return tx.Rollback()
 	}
-	if ok {
+	if !borrowed {
 		return tx.Commit()
 	}
 	return nil
@@ -310,6 +315,7 @@ func (db *DB) WithTx(ctx context.Context, f func(ctx context.Context, tx *sql.Tx
 
 func cleanifaces(ifss ...[]interface{}) [][]interface{} {
 	for i, ifs := range ifss {
+		ifs = ifs[:cap(ifs)]
 		for j := range ifs {
 			ifs[j] = nil
 		}
@@ -391,9 +397,9 @@ func (db *DB) putstringsLocked(strss ...[]string) {
 }
 
 type table struct {
+	sqlUpdate  string
 	sqlInsert  string
 	insertFunc func(t *table, ctx context.Context, db *DB, cmder sqlCmdImpl, m Model) (ids Model, err error)
-	sqlUpdate  string
 	// idColNum is the column number (index + 1) of the ID column in the
 	// table.  It's used to calculate which field to skip on inserts
 	// into tables with auto-incrementing IDs.
@@ -404,6 +410,9 @@ type table struct {
 	goType   reflect.Type
 }
 
+// getTable gets or creates a table from the given value and model.  The value
+// is passed separately from the model in case the model is a runtime-generated
+// wrapper around a simple struct
 func (db *DB) getTable(v interface{}, m Model) *table {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -424,8 +433,8 @@ func (db *DB) getTableLocked(v interface{}, m Model) *table {
 	return t
 }
 
-// init initializes a table within a DB.  This function must be run
-// while holding db's mutex.
+// initWithUnsafeDB initializes a table within a DB.  This function
+// must be run while holding db's mutex.
 func (t *table) initWithUnsafeDB(db *DB, m Model, tp reflect.Type) {
 	v, ok := interfaceOf2(m)
 	if ok {
@@ -435,7 +444,13 @@ func (t *table) initWithUnsafeDB(db *DB, m Model, tp reflect.Type) {
 	if tnr, ok := v.(interface{ TableName() string }); ok {
 		t.rawName = tnr.TableName()
 	} else {
-		t.rawName = tp.Elem().Name()
+		switch {
+		// TODO: Might need additional checks?
+		case tp.Kind() == reflect.Ptr:
+			t.rawName = tp.Elem().Name()
+		default:
+			t.rawName = tp.Name()
+		}
 	}
 	t.sqlName = db.dialect.Escape(
 		db.tableNamer.Apply(
@@ -583,7 +598,10 @@ func (t *table) insertQuery(ctx context.Context, db *DB, cmder sqlCmdImpl, m Mod
 		return nil, errCannotDetermineID
 	}
 	logger.Verbose2("inserting %v with SQL:\n\t%v", m, t.sqlInsert)
-	err = cmder.QueryRowContext(ctx, t.sqlInsert, m.AppendValues(nil)...).Scan(ids.AppendFields(nil))
+	vs, fs := db.getifaces(), db.getifaces()
+	defer db.putifaces(vs, fs)
+	defer cleanifaces(vs, fs)
+	err = cmder.QueryRowContext(ctx, t.sqlInsert, m.AppendValues(vs)...).Scan(ids.AppendFields(fs))
 	logger.Verbose1("insert result: %v", m)
 	return
 }
