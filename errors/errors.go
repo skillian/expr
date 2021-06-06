@@ -37,7 +37,7 @@ func Catch(p *error, f func() error) {
 	*p = Aggregate(*p, f())
 }
 
-// First gets the first error that f(error) returns true.
+// First gets the first error for which f(error) returns true.
 func First(err error, f func(e error) bool) error {
 	if errs, ok := err.(errors); ok {
 		for _, err := range errs {
@@ -137,7 +137,6 @@ func (errs errors) Error() string {
 type message struct {
 	format string
 	args   []interface{}
-	cache  [3]interface{}
 	pcs
 }
 
@@ -178,8 +177,8 @@ func Errorf1(format string, arg interface{}) error {
 func errorf1(skip int, format string, arg interface{}) error {
 	m := newMessage(skip + 2)
 	m.format = format
-	m.cache[0] = arg
-	m.args = m.cache[:1]
+	m.args = make([]interface{}, 1)
+	m.args[0] = arg
 	return m
 }
 
@@ -191,9 +190,9 @@ func Errorf2(format string, arg0, arg1 interface{}) error {
 func errorf2(skip int, format string, arg0, arg1 interface{}) error {
 	m := newMessage(skip + 2)
 	m.format = format
-	m.cache[0] = arg0
-	m.cache[1] = arg1
-	m.args = m.cache[:2]
+	m.args = make([]interface{}, 2)
+	m.args[0] = arg0
+	m.args[1] = arg1
 	return m
 }
 
@@ -205,10 +204,10 @@ func Errorf3(format string, arg0, arg1, arg2 interface{}) error {
 func errorf3(skip int, format string, arg0, arg1, arg2 interface{}) error {
 	m := newMessage(skip + 2)
 	m.format = format
-	m.cache[0] = arg0
-	m.cache[1] = arg1
-	m.cache[2] = arg2
-	m.args = m.cache[:3]
+	m.args = make([]interface{}, 3)
+	m.args[0] = arg0
+	m.args[1] = arg1
+	m.args[2] = arg2
 	return m
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // callerRuntimeFunc gets the runtime.Func of the caller of the caller func.
@@ -30,18 +31,34 @@ type pcs struct {
 	pcs []uintptr
 }
 
+var getUintptr, putUintptr = func() (get func() []uintptr, put func([]uintptr)) {
+	pool := sync.Pool{
+		New: func() interface{} {
+			return make([]uintptr, 0, 32)
+		},
+	}
+	return func() []uintptr {
+			return pool.Get().([]uintptr)
+		}, func(ps []uintptr) {
+			pool.Put(ps)
+		}
+}()
+
 func (ps *pcs) put(skip int) {
-	ps.pcs = make([]uintptr, 0, 8)
+	pcs := getUintptr()
 	for {
-		length, limit := len(ps.pcs), cap(ps.pcs)
+		length, limit := len(pcs), cap(pcs)
 		n := runtime.Callers(length+skip+1, ps.pcs[length:limit])
-		ps.pcs = ps.pcs[:length+n]
-		if len(ps.pcs) == cap(ps.pcs) {
-			ps.pcs = append(ps.pcs, 0)[:limit]
+		pcs = pcs[:length+n]
+		if len(pcs) == cap(pcs) {
+			pcs = append(pcs, 0)[:limit]
 			continue
 		}
 		break
 	}
+	ps.pcs = make([]uintptr, len(pcs))
+	copy(ps.pcs, pcs)
+	putUintptr(pcs[:0])
 }
 
 func (ps *pcs) Error() string {
