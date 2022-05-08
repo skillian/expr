@@ -1,0 +1,246 @@
+
+var eeTypeInfos = func() (m sync.Map) {
+	m.Store(reflect.TypeOf(""), &eeTypeInfo{
+		eq:  func2x1ToCtx2Anyx2(func(a, b string) bool { return a == b }),
+		cmp: func2x1ToCtx2Anyx2(strings.Compare),
+	})
+	m.Store(reflect.TypeOf((*big.Rat)(nil)), &eeTypeInfo{
+		eq: func2x1ToCtx2Anyx2(func(a, b *big.Rat) bool {
+			return a.Cmp(b) == 0
+		}),
+		cmp: func2x1ToCtx2Anyx2((*big.Rat).Cmp),
+	})
+	return
+}()
+
+func getEETypeInfo(t reflect.Type) *eeTypeInfo {
+	newEETypeInfo := func(t reflect.Type) *eeTypeInfo {
+		createCmpFunc := func(t reflect.Type) func(context.Context, any, any) int {
+			if m, ok := getReflectMethod(
+				t, "Cmp",
+				[]reflect.Type{selfType, selfType},
+				[]reflect.Type{reflect.TypeOf(int(0))},
+			); ok {
+				return func(ctx context.Context, a, b any) int {
+					return int(m.Func.Call([]reflect.Value{
+						reflect.ValueOf(a),
+						reflect.ValueOf(b),
+					})[0].Int())
+				}
+			}
+			return nil
+		}
+		createEqFunc := func(t reflect.Type) func(context.Context, any, any) bool {
+			if m, ok := getReflectMethod(
+				t, "Eq",
+				[]reflect.Type{selfType, selfType},
+				[]reflect.Type{reflect.TypeOf(false)},
+			); ok {
+				return func(ctx context.Context, a, b any) bool {
+					return m.Func.Call([]reflect.Value{
+						reflect.ValueOf(a),
+						reflect.ValueOf(b),
+					})[0].Bool()
+				}
+			}
+			return nil
+		}
+		ti := &eeTypeInfo{}
+		for t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		switch t.Kind() {
+		case reflect.Bool:
+			ti.eq = func(ctx context.Context, a, b any) bool {
+				return reflect.ValueOf(a).Bool() == reflect.ValueOf(b).Bool()
+			}
+			ti.cmp = eeDefaultCmp
+		case reflect.Float32, reflect.Float64:
+			ti.eq = func(ctx context.Context, a, b any) bool {
+				f := reflect.ValueOf(a).Float() - reflect.ValueOf(b).Float()
+				return math.Abs(f) <= FloatToleranceFromContext(ctx)
+			}
+			ti.cmp = func(ctx context.Context, a, b any) int {
+				f := reflect.ValueOf(a).Float() - reflect.ValueOf(b).Float()
+				if math.Abs(f) <= FloatToleranceFromContext(ctx) {
+					return 0
+				}
+				if f < 0 {
+					return -1
+				}
+				return 1
+			}
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			ti.eq = func(ctx context.Context, a, b any) bool {
+				return reflect.ValueOf(a).Int() == reflect.ValueOf(b).Int()
+			}
+			ti.cmp = func(ctx context.Context, a, b any) int {
+				cmp := reflect.ValueOf(a).Int() - reflect.ValueOf(b).Int()
+				switch {
+				case cmp == 0:
+					return 0
+				case cmp < 0:
+					return -1
+				}
+				return 1
+			}
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			ti.eq = func(ctx context.Context, a, b any) bool {
+				return reflect.ValueOf(a).Uint() == reflect.ValueOf(b).Uint()
+			}
+			ti.cmp = func(ctx context.Context, a, b any) int {
+				// TODO: I'm not sure this is right:
+				cmp := int64(reflect.ValueOf(a).Uint() - reflect.ValueOf(b).Uint())
+				switch {
+				case cmp == 0:
+					return 0
+				case cmp < 0:
+					return -1
+				}
+				return 1
+			}
+		case reflect.Struct, reflect.Interface:
+			ti.eq = createEqFunc(t)
+			ti.cmp = createCmpFunc(t)
+		}
+		if ti.eq == nil {
+			ti.eq = eeDefaultEq
+		}
+		if ti.cmp == nil {
+			ti.cmp = eeDefaultCmp
+		}
+		return ti
+	}
+	var key any = t
+	tiv, loaded := eeTypeInfos.Load(key)
+	if loaded {
+		return tiv.(*eeTypeInfo)
+	}
+	ti := newEETypeInfo(t)
+	tiv, loaded = eeTypeInfos.LoadOrStore(key, ti)
+	if loaded {
+		return tiv.(*eeTypeInfo)
+	}
+	return ti
+}
+
+type eeStack struct {
+	wrds []eeWord
+	strs []string
+	anys []any
+}
+
+func (st *eeStack) pushInt(v int) int {
+	var w eeWord
+	*w.int() = v
+	return st.pushWord(w)
+}
+
+func (st *eeStack) pushInt64(v int64) int {
+	var w eeWord
+	*w.int64() = v
+	return st.pushWord(w)
+}
+
+func (st *eeStack) pushFloat64(v int) int {
+	var w eeWord
+	*w.int() = v
+	return st.pushWord(w)
+}
+
+func (st *eeStack) pushWord(w eeWord) int {
+	st.wrds = append(st.wrds, w)
+	return len(st.wrds) - 1
+}
+
+type eeWord struct {
+	data uint64
+}
+
+func (w eeWord) float64() *float64 { return (*float64)(unsafe.Pointer(&w.data)) }
+func (w eeWord) int64() *int64     { return (*int64)(unsafe.Pointer(&w.data)) }
+func (w eeWord) int() *int         { return (*int)(unsafe.Pointer(&w.data)) }
+
+func func2x1ToCtx2Anyx2[A, R any](f func(A, A) R) func(context.Context, any, any) R {
+	return func(ctx context.Context, a1, a2 any) R {
+		return f(a1.(A), a2.(A))
+	}
+}
+
+func eeDefaultCmp(ctx context.Context, a, b any) int {
+	panic(fmt.Errorf(
+		"%[1]w: cannot compare %[2]v (type: %[2]T) to %[3]v (type: %[3]T)",
+		ErrInvalidType, a, b,
+	))
+}
+
+func eeDefaultEq(ctx context.Context, a, b any) bool { return a == b }
+
+type selfTypePlaceholder struct{}
+
+var selfType = reflect.TypeOf((*selfTypePlaceholder)(nil))
+
+func getReflectMethod(t reflect.Type, name string, ins, outs []reflect.Type) (m reflect.Method, ok bool) {
+	m, ok = t.MethodByName(name)
+	if !ok && t.Kind() == reflect.Struct {
+		t = t.Elem()
+		m, ok = t.MethodByName(name)
+	}
+	if !ok {
+		return
+	}
+	if err := checkReflectFuncTypes(m.Func.Type(), t, ins, outs); err != nil {
+		return reflect.Method{}, false
+	}
+	return
+}
+
+func checkReflectFuncTypes(f reflect.Type, self reflect.Type, ins, outs []reflect.Type) error {
+	checkType := func(self, expect, actual reflect.Type) error {
+		if expect == nil {
+			return nil
+		}
+		if expect == selfType {
+			expect = self
+		}
+		if expect != actual {
+			return makeInvalidType(
+				reflect.Zero(expect),
+				reflect.Zero(actual),
+			)
+		}
+		return nil
+	}
+	checkTypes := func(self, ftype reflect.Type, expects []reflect.Type, selector func(reflect.Type, int) reflect.Type) error {
+		for i, expect := range expects {
+			actual := selector(ftype, i)
+			if err := checkType(self, expect, actual); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if ins != nil {
+		if f.NumIn() != len(ins) {
+			return fmt.Errorf(
+				"function type %v expected %d argument(s), but actually has %d",
+				f, len(ins), f.NumIn(),
+			)
+		}
+		if err := checkTypes(self, f, ins, reflect.Type.In); err != nil {
+			return err
+		}
+	}
+	if outs != nil {
+		if f.NumOut() != len(outs) {
+			return fmt.Errorf(
+				"function type %v expected %d return value(s), but actually has %d",
+				f, len(outs), f.NumOut(),
+			)
+		}
+		if err := checkTypes(self, f, outs, reflect.Type.Out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
