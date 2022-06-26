@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -129,8 +130,12 @@ func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) (
 
 // reset the function builder before it is put back into the pool.
 func (b *exprFuncBuilder) reset() {
-	for _, fr := range b.stack {
-		b.putFrame(fr)
+	if len(b.stack[0].opers) == 0 {
+		return
+	}
+	b.putFrame(b.stack[0].opers[0])
+	for i := range b.stack {
+		b.stack[i] = nil
 	}
 	b.stack = b.stack[:0]
 	b.stack = append(b.stack, b.getFrame())
@@ -161,7 +166,13 @@ func (b *exprFuncBuilder) walk(e Expr) bool {
 	}
 	t, err := b.checkType(op, top)
 	if errors.Is(err, ErrInvalidType) {
-		t, err = b.tryPromoteNumTypes(top)
+		if len(top.opers) == 2 {
+			if left, ok := top.opers[1].t.(eeNumType); ok {
+				if right, ok := top.opers[0].t.(eeNumType); ok {
+					t, err = b.tryPromoteNumTypes(top, left, right)
+				}
+			}
+		}
 	}
 	if err != nil {
 		b.err = err
@@ -244,16 +255,8 @@ func (b *exprFuncBuilder) checkType(op opCode, fr *efbStackFrame) (returnType ee
 	return
 }
 
-func (b *exprFuncBuilder) tryPromoteNumTypes(fr *efbStackFrame) (returnType eeType, err error) {
+func (b *exprFuncBuilder) tryPromoteNumTypes(fr *efbStackFrame, leftNt, rightNt eeNumType) (returnType eeType, err error) {
 	left, right := fr.opers[1], fr.opers[0] // backwards on purpose
-	leftNt, ok := left.t.(eeNumType)
-	if !ok {
-		return nil, fmt.Errorf("%w: %v is not a number", ErrInvalidType, left.e)
-	}
-	rightNt, ok := right.t.(eeNumType)
-	if !ok {
-		return nil, fmt.Errorf("%w: %v is not a number", ErrInvalidType, right.e)
-	}
 	numTypeIndex := func(nt eeNumType) int {
 		for i, t := range numTypePromotions {
 			if t == nt {
@@ -315,11 +318,11 @@ func (b *exprFuncBuilder) genOp() opCode {
 	case Div:
 		return opDiv
 	case Mem:
-		// note that operands are backwards, so opers[1] is
-		// the first operand to Mem
-		switch top.opers[1].t.(type) {
-		case eeMapType:
+		if _, ok := top.opers[1].t.(eeMapType); ok {
 			return opLdk
+		}
+		if _, ok := b.peekFrame(1).e.(Mem); ok {
+			return opLdma
 		}
 		return opLdm
 	default:
@@ -417,6 +420,7 @@ func (b *exprFuncBuilder) build() (f *opFunc, err error) {
 
 func (b *exprFuncBuilder) getAllOps() []opCode {
 	ops := make([]opCode, 0, 64)
+	var lastOps []opCode
 	stack := make([]*efbStackFrame, 0, 8)
 	b.stack[0].walk(func(fr *efbStackFrame) {
 		if fr != nil {
@@ -425,7 +429,15 @@ func (b *exprFuncBuilder) getAllOps() []opCode {
 		}
 		fr = stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		ops = append(ops, fr.codes...)
+		if bytes.Equal(
+			asByteSlice(lastOps),
+			asByteSlice(fr.codes),
+		) {
+			ops = append(ops, opDup)
+		} else {
+			ops = append(ops, fr.codes...)
+			lastOps = fr.codes
+		}
 	})
 	return ops
 }
@@ -458,14 +470,14 @@ func appendIntToOpCodesInto(ops *[]opCode, i int64) {
 
 func appendIntToOpCodes(ops []opCode, i int64) []opCode {
 	var bs [9]byte
-	n := binary.PutVarint(bs[:], i)
+	n := binary.PutUvarint(bs[:], uint64(i))
 	return append(ops, asOpCodeSlice(bs[:n])...)
 }
 
-func getIntFromOpCodes(ops []opCode) (i int64, n int) {
-	_, n, _, _ = minMaxBy("", len(ops), "", 9)
-	i, n = binary.Varint(asByteSlice(ops[:n]))
-	return
+func getIntFromOpCodes(ops []opCode) (int64, int) {
+	_, n, _, _ := minMaxBy("", len(ops), "", 9)
+	u, n := binary.Uvarint(asByteSlice(ops[:n]))
+	return int64(u), n
 }
 
 func asByteSlice[T ~byte](sl []T) []byte {
@@ -614,6 +626,12 @@ const (
 	//
 	opConv2
 
+	// opSwap2 swaps the top two operands on the stack
+	opSwap2
+
+	// opDup duplicates the top operand on the stack.
+	opDup
+
 	// opLdc loads a constant from the function's constants.  It is
 	// followed by a variadic int in the actual byte code which
 	// indexes into a func's constkeys which is then used to
@@ -663,6 +681,11 @@ func (op opCode) arity() int {
 type funcCache struct {
 	parent *funcCache
 	funcs  sync.Map // funcKey -> funcData
+}
+
+// WithFuncCache creates a context with a function cache in it.
+func WithFuncCache(ctx context.Context) context.Context {
+	return ctxutil.AddToContext(ctx, newFuncCache(ctx))
 }
 
 func newFuncCache(ctx context.Context) *funcCache {
@@ -801,7 +824,7 @@ func (k funcTypeSigKey) appendString(sb *strings.Builder) {
 			i++
 			j := int(k[i])
 			i++
-			sb.WriteString(string(k[i:j]))
+			sb.WriteString(string(k[i : i+j]))
 			i += j - 1 // loop will increment 1
 			continue
 		}

@@ -24,16 +24,18 @@ func _() {
 	_ = x[opDiv-13]
 	_ = x[opConv1-14]
 	_ = x[opConv2-15]
-	_ = x[opLdc-16]
-	_ = x[opLdv-17]
-	_ = x[opLdm-18]
-	_ = x[opLdma-19]
-	_ = x[opLdk-20]
+	_ = x[opSwap2-16]
+	_ = x[opDup-17]
+	_ = x[opLdc-18]
+	_ = x[opLdv-19]
+	_ = x[opLdm-20]
+	_ = x[opLdma-21]
+	_ = x[opLdk-22]
 }
 
-const _opCode_name = "NopNotAndOrEqNeGtGeLtLeAddSubMulDivConv1Conv2LdcLdvLdmLdmaLdk"
+const _opCode_name = "NopNotAndOrEqNeGtGeLtLeAddSubMulDivConv1Conv2Swap2DupLdcLdvLdmLdmaLdk"
 
-var _opCode_index = [...]uint8{0, 3, 6, 9, 11, 13, 15, 17, 19, 21, 23, 26, 29, 32, 35, 40, 45, 48, 51, 54, 58, 61}
+var _opCode_index = [...]uint8{0, 3, 6, 9, 11, 13, 15, 17, 19, 21, 23, 26, 29, 32, 35, 40, 45, 50, 53, 56, 59, 62, 66, 69}
 
 func (i opCode) String() string {
 	if i >= opCode(len(_opCode_index)-1) {

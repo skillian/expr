@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/skillian/ctxutil"
@@ -27,11 +29,15 @@ func (t FloatTolerance) ContextKey() interface{} {
 
 // Eval evaluates the given expression.
 func Eval(ctx context.Context, e Expr, vs Values) (interface{}, error) {
+	eev := exprEvaluators.Get()
+	defer exprEvaluators.Put(eev)
+	ee := eev.(*exprEvaluator)
 	fc, ok := ctxutil.FromContextKey(ctx, (*funcCache)(nil)).(*funcCache)
 	var fk funcKey
 	if ok {
 		fk = makeFuncKey(ctx, e, vs)
 		if fn, ok := fc.load(fk); ok {
+			ctx = ctxutil.AddToContext(ctx, ee)
 			return fn.Call(ctx, vs)
 		}
 	}
@@ -42,7 +48,7 @@ func Eval(ctx context.Context, e Expr, vs Values) (interface{}, error) {
 	if ok {
 		fn, _ = fc.loadOrStore(fk, fn)
 	}
-	ctx = ctxutil.AddToContext(ctx, exprEvaluators.Get().(*exprEvaluator))
+	ctx = ctxutil.AddToContext(ctx, ee)
 	return fn.Call(ctx, vs)
 }
 
@@ -85,14 +91,13 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (er
 	}(&err)
 	for pc := 0; pc < len(f.ops); pc++ {
 		op := f.ops[pc]
-		if op == opNop {
-			continue
-		}
 		var et eeType
 		if len(ee.stack.types) > 0 {
 			et = ee.stack.peekType()
 		}
 		switch op {
+		case opNop:
+			continue
 		case opNot:
 			n := ee.stack.popNum()
 			ee.stack.pushNum(eeNumBool(!(*n.bool())))
@@ -148,6 +153,16 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (er
 				conver = target.(eeConvType)
 			}
 			conver.conv(ee, target)
+		case opSwap2:
+			v1, t1 := ee.stack.pop()
+			v2, t2 := ee.stack.pop()
+			ee.stack.push(v1, t1)
+			ee.stack.push(v2, t2)
+		case opDup:
+			vs := (*eeValues)(&ee.stack)
+			i := et.appendZero(vs)
+			et.copy(vs, i, vs, i-1)
+			ee.stack.pushType(et)
 		case opLdc:
 			fallthrough
 		case opLdv:
@@ -156,16 +171,25 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (er
 			pc += n - 1 // loop will increment 1
 			k := f.constkeys[int(i64)]
 			et = f.consts.types[k.typeIndex]
-			et.pushValue(&ee.stack, &f.consts, k.valIndex)
+			vals := (*eeValues)(&ee.stack)
+			i := et.appendZero(vals)
+			et.copy(vals, i, &f.consts, k.valIndex)
 			ee.stack.pushType(et)
 			if op == opLdv {
-				va := et.pop(&ee.stack).(Var)
+				v, _ := ee.stack.pop()
+				va := v.(Var)
 				v, err := vs.Get(ctx, va)
 				if err != nil {
 					panic(err)
 				}
 				ee.stack.push(v, nil)
 			}
+		case opLdm:
+			et.(eeMemType).mem(ee).get(ee)
+		case opLdma:
+			et.(eeMemType).mem(ee).ref(ee)
+		case opLdk:
+			et.(eeMapType).key(ee)
 		default:
 			panic(fmt.Errorf("%w: %v", errInvalidOp, op))
 		}
@@ -464,11 +488,8 @@ type eeType interface {
 	// pop a value of type eeType from the eeStack
 	pop(*eeStack) interface{}
 
-	// pushValue retrieves a value from the eeValues (like get)
-	// and pushes it to the eeStack (like eeStack.push).  The only
-	// difference is the value is not boxed into an interface{}
-	// where it might escape to the heap in between.
-	pushValue(*eeStack, *eeValues, int)
+	// copy a value out of one collection of values into another
+	copy(dest *eeValues, destIndex int, src *eeValues, srcIndex int)
 
 	// typeCheck is used during function generation to check if the
 	// given operation is compatible with the other operand.
@@ -543,6 +564,7 @@ func eeTypeFromReflectType(rt reflect.Type) eeType {
 	//	}
 	//
 	newType := func(rt reflect.Type) (et eeType, init func(et eeType, rt reflect.Type)) {
+		mems := make([]eeMem, 0, 16)
 		switch rt.Kind() {
 		case reflect.Map:
 			t := &eeReflectMapType{}
@@ -551,6 +573,77 @@ func eeTypeFromReflectType(rt reflect.Type) eeType {
 					rt.Elem(),
 				)
 			}
+		case reflect.Ptr:
+			rt = rt.Elem()
+			if rt.Kind() != reflect.Struct {
+				panic(fmt.Errorf(
+					"%w: cannot create type from "+
+						"pointer to %v",
+					ErrInvalidType, rt,
+				))
+			}
+			fallthrough
+		case reflect.Struct:
+			nf := rt.NumField()
+			for i := 0; i < nf; i++ {
+				f := rt.Field(i)
+				sf := &eeStructField{
+					et: eeTypeFromReflectType(f.Type),
+					ix: f.Index,
+				}
+				mems = append(mems, sf)
+			}
+			fallthrough
+		case reflect.Interface:
+			ert := &eeReflectType{
+				rtype: rt,
+			}
+			nm := rt.NumMethod()
+			mms := make(map[string]*eeReflectMethodMem)
+			for i := 0; i < nm; i++ {
+				m := rt.Method(i)
+				ft := m.Func.Type()
+				isSet := false
+				if len(m.Name) > 3 && strings.HasPrefix(m.Name, "Set") {
+					r, _ := utf8.DecodeRuneInString(m.Name[3:])
+					if r == utf8.RuneError {
+						panic(fmt.Errorf(
+							"invalid method name: %v",
+							m.Name,
+						))
+					}
+					isSet = unicode.IsUpper(r)
+				}
+				if isSet {
+					if ft.NumIn() != 2 || ft.NumOut() != 0 {
+						continue
+					}
+					ft = ft.In(1)
+					m.Name = m.Name[3:]
+				} else {
+					if ft.NumIn() != 1 || ft.NumOut() != 1 {
+						continue
+					}
+					ft = ft.Out(0)
+				}
+				mem, ok := mms[m.Name]
+				if !ok {
+					mem = &eeReflectMethodMem{
+						selfType:  ert,
+						valueType: eeTypeFromReflectType(ft),
+					}
+					mems = append(mems, mem)
+					mms[m.Name] = mem
+				}
+				if isSet {
+					mem.setter = m.Func
+				} else {
+					mem.getter = m.Func
+				}
+			}
+			ert.mems = make([]eeMem, len(mems))
+			copy(ert.mems, mems)
+			return ert, func(et eeType, rt reflect.Type) {}
 		}
 		panic("not implemented")
 	}
@@ -629,8 +722,8 @@ func (eeBoolType) pop(es *eeStack) interface{} {
 	return *n.bool()
 }
 
-func (eeBoolType) pushValue(es *eeStack, vs *eeValues, i int) {
-	es.pushNum(vs.nums[i])
+func (eeBoolType) copy(dest *eeValues, j int, src *eeValues, i int) {
+	dest.nums[j] = src.nums[i]
 }
 
 func (eeBoolType) typeCheck(e Expr, t2 eeType) eeType {
@@ -675,19 +768,19 @@ var _ interface {
 	eeNumType
 } = (*numType)(nil)
 
-func (t *numType) add(ee *exprEvaluator)                      { ee.stack.pushNum(t.impl.add(t.pop2Num(&ee.stack, false))) }
-func (t *numType) append(vs *eeValues, v interface{}) int     { return vs.appendNum(t.impl.valToNum(v)) }
-func (t *numType) appendZero(vs *eeValues) int                { return vs.appendNum(eeNum{}) }
-func (t *numType) cmp(ee *exprEvaluator) int                  { return t.impl.cmp(t.pop2Num(&ee.stack, true)) }
-func (t *numType) div(ee *exprEvaluator)                      { ee.stack.pushNum(t.impl.div(t.pop2Num(&ee.stack, false))) }
-func (t *numType) eq(ee *exprEvaluator) bool                  { return t.impl.eq(t.pop2Num(&ee.stack, true)) }
-func (t *numType) get(vs *eeValues, i int) interface{}        { return t.impl.numToVal(vs.nums[i]) }
-func (t *numType) mul(ee *exprEvaluator)                      { ee.stack.pushNum(t.impl.mul(t.pop2Num(&ee.stack, false))) }
-func (t *numType) peek(es *eeStack) interface{}               { return t.impl.numToVal(es.peekNum()) }
-func (t *numType) pop(es *eeStack) interface{}                { return t.impl.numToVal(es.popNum()) }
-func (t *numType) pushValue(es *eeStack, vs *eeValues, i int) { es.pushNum(vs.nums[i]) }
-func (t *numType) set(vs *eeValues, i int, v interface{})     { vs.nums[i] = t.impl.valToNum(v) }
-func (t *numType) sub(ee *exprEvaluator)                      { ee.stack.pushNum(t.impl.sub(t.pop2Num(&ee.stack, false))) }
+func (t *numType) add(ee *exprEvaluator)                            { ee.stack.pushNum(t.impl.add(t.pop2Num(&ee.stack, false))) }
+func (t *numType) append(vs *eeValues, v interface{}) int           { return vs.appendNum(t.impl.valToNum(v)) }
+func (t *numType) appendZero(vs *eeValues) int                      { return vs.appendNum(eeNum{}) }
+func (t *numType) cmp(ee *exprEvaluator) int                        { return t.impl.cmp(t.pop2Num(&ee.stack, true)) }
+func (t *numType) div(ee *exprEvaluator)                            { ee.stack.pushNum(t.impl.div(t.pop2Num(&ee.stack, false))) }
+func (t *numType) eq(ee *exprEvaluator) bool                        { return t.impl.eq(t.pop2Num(&ee.stack, true)) }
+func (t *numType) get(vs *eeValues, i int) interface{}              { return t.impl.numToVal(vs.nums[i]) }
+func (t *numType) mul(ee *exprEvaluator)                            { ee.stack.pushNum(t.impl.mul(t.pop2Num(&ee.stack, false))) }
+func (t *numType) peek(es *eeStack) interface{}                     { return t.impl.numToVal(es.peekNum()) }
+func (t *numType) pop(es *eeStack) interface{}                      { return t.impl.numToVal(es.popNum()) }
+func (t *numType) copy(dest *eeValues, j int, src *eeValues, i int) { dest.nums[j] = src.nums[i] }
+func (t *numType) set(vs *eeValues, i int, v interface{})           { vs.nums[i] = t.impl.valToNum(v) }
+func (t *numType) sub(ee *exprEvaluator)                            { ee.stack.pushNum(t.impl.sub(t.pop2Num(&ee.stack, false))) }
 
 func (t *numType) typeCheck(e Expr, t2 eeType) eeType {
 	// by default, only support comparisson and arithmetic,
@@ -952,11 +1045,11 @@ func (eeTimeType) eq(ee *exprEvaluator) bool {
 	return ee.stack.popAny().(time.Time).Equal(ee.stack.popAny().(time.Time))
 }
 
-func (eeTimeType) get(vs *eeValues, i int) interface{}        { return vs.anys[i] }
-func (eeTimeType) mul(ee *exprEvaluator)                      { panic("cannot multiply a time") }
-func (eeTimeType) peek(es *eeStack) interface{}               { return es.peekAny() }
-func (eeTimeType) pop(es *eeStack) interface{}                { return es.popAny() }
-func (eeTimeType) pushValue(es *eeStack, vs *eeValues, i int) { es.pushAny(vs.anys[i]) }
+func (eeTimeType) get(vs *eeValues, i int) interface{}              { return vs.anys[i] }
+func (eeTimeType) mul(ee *exprEvaluator)                            { panic("cannot multiply a time") }
+func (eeTimeType) peek(es *eeStack) interface{}                     { return es.peekAny() }
+func (eeTimeType) pop(es *eeStack) interface{}                      { return es.popAny() }
+func (eeTimeType) copy(dest *eeValues, j int, src *eeValues, i int) { dest.anys[j] = src.anys[i] }
 
 func (eeTimeType) set(vs *eeValues, i int, v interface{}) {
 	vs.anys[i] = v
@@ -1016,11 +1109,11 @@ func (eeAnyType) eq(ee *exprEvaluator) bool {
 	return a == b
 }
 
-func (eeAnyType) get(vs *eeValues, i int) interface{}        { return vs.anys[i] }
-func (eeAnyType) set(vs *eeValues, i int, v interface{})     { vs.anys[i] = v }
-func (eeAnyType) peek(es *eeStack) interface{}               { return es.peekAny() }
-func (eeAnyType) pop(es *eeStack) interface{}                { return es.popAny() }
-func (eeAnyType) pushValue(es *eeStack, vs *eeValues, i int) { es.pushAny(vs.anys[i]) }
+func (eeAnyType) get(vs *eeValues, i int) interface{}              { return vs.anys[i] }
+func (eeAnyType) set(vs *eeValues, i int, v interface{})           { vs.anys[i] = v }
+func (eeAnyType) peek(es *eeStack) interface{}                     { return es.peekAny() }
+func (eeAnyType) pop(es *eeStack) interface{}                      { return es.popAny() }
+func (eeAnyType) copy(dest *eeValues, j int, src *eeValues, i int) { dest.anys[j] = src.anys[i] }
 
 type eeMathBigRatType struct{ eeAnyType }
 
@@ -1038,6 +1131,10 @@ func (eeMathBigRatType) add(ee *exprEvaluator) {
 func (eeMathBigRatType) cmp(ee *exprEvaluator) int {
 	a, b := eeMathBigRatType{}.pop2BigRat(&ee.stack, true)
 	return a.Cmp(b)
+}
+
+func (eeMathBigRatType) copy(dest *eeValues, j int, src *eeValues, i int) {
+	dest.anys[j] = (&big.Rat{}).Set(src.anys[i].(*big.Rat))
 }
 
 func (eeMathBigRatType) div(ee *exprEvaluator) {
@@ -1105,11 +1202,11 @@ func (eeStringType) eq(ee *exprEvaluator) bool {
 	return ee.ctx.streq(a, b)
 }
 
-func (eeStringType) get(vs *eeValues, i int) interface{}        { return vs.strs[i] }
-func (eeStringType) peek(es *eeStack) interface{}               { return es.peekStr() }
-func (eeStringType) pop(es *eeStack) interface{}                { return es.popStr() }
-func (eeStringType) pushValue(es *eeStack, vs *eeValues, i int) { es.pushStr(vs.strs[i]) }
-func (eeStringType) set(vs *eeValues, i int, v interface{})     { vs.strs[i] = v.(string) }
+func (eeStringType) get(vs *eeValues, i int) interface{}              { return vs.strs[i] }
+func (eeStringType) peek(es *eeStack) interface{}                     { return es.peekStr() }
+func (eeStringType) pop(es *eeStack) interface{}                      { return es.popStr() }
+func (eeStringType) copy(dest *eeValues, j int, src *eeValues, i int) { dest.strs[j] = src.strs[i] }
+func (eeStringType) set(vs *eeValues, i int, v interface{})           { vs.strs[i] = v.(string) }
 func (eeStringType) typeCheck(e Expr, t2 eeType) eeType {
 	switch e.(type) {
 	case Eq, Ne, Gt, Ge, Lt, Le:
@@ -1163,13 +1260,25 @@ var _ interface {
 } = (*eeReflectType)(nil)
 
 func (rt *eeReflectType) mem(ee *exprEvaluator) eeMem {
+	v, t := ee.stack.pop() // reflect value
 	_ = ee.stack.popType()
 	n := ee.stack.popNum()
+	ee.stack.push(v, t)
 	return rt.mems[*n.int()]
 }
 
 func (rt *eeReflectType) typeCheck(e Expr, t2 eeType) eeType {
-	return rt.mems[e.(Mem)[1].(int)].memType()
+	switch e := e.(type) {
+	case Eq, Ne:
+		if t2 == rt {
+			return boolType
+		}
+	case Mem:
+		if i, ok := e[1].(int); ok {
+			return rt.mems[i].memType()
+		}
+	}
+	return nil
 }
 
 type eeStructField struct {
@@ -1186,7 +1295,22 @@ func (sf *eeStructField) get(ee *exprEvaluator) {
 }
 
 func (sf *eeStructField) ref(ee *exprEvaluator) {
-	ee.stack.push(sf.field(ee).Addr().Interface(), sf.et)
+	f := sf.field(ee)
+	if f.Kind() != reflect.Ptr {
+		// TODO: Hack for getting the address of a pointer
+		// field, e.g.:
+		//
+		//	type S1 struct {
+		//		S string
+		//	}
+		//
+		//	type S2 struct {
+		//		S1 *S1	// <- don't want a double-ptr here
+		//	}
+		//
+		f = f.Addr()
+	}
+	ee.stack.push(f.Interface(), sf.et)
 }
 
 func (sf *eeStructField) set(ee *exprEvaluator) {
@@ -1200,6 +1324,38 @@ func (sf *eeStructField) field(ee *exprEvaluator) reflect.Value {
 	v, _ := ee.stack.pop()
 	return reflect.ValueOf(v).Elem().FieldByIndex(sf.ix)
 }
+
+type eeReflectMethodMem struct {
+	selfType  eeType
+	valueType eeType
+	getter    reflect.Value
+	setter    reflect.Value
+}
+
+var _ interface {
+	eeMem
+} = (*eeReflectMethodMem)(nil)
+
+func (m *eeReflectMethodMem) get(ee *exprEvaluator) {
+	v, _ := ee.stack.pop()
+	vs := m.getter.Call([]reflect.Value{reflect.ValueOf(v)})
+	ee.stack.push(vs[0].Interface(), m.valueType)
+}
+
+func (m *eeReflectMethodMem) ref(ee *exprEvaluator) {
+	panic("cannot take the address of a method")
+}
+
+func (m *eeReflectMethodMem) set(ee *exprEvaluator) {
+	self, _ := ee.stack.pop()
+	value, _ := ee.stack.pop()
+	_ = m.setter.Call([]reflect.Value{
+		reflect.ValueOf(self),
+		reflect.ValueOf(value),
+	})
+}
+
+func (m *eeReflectMethodMem) memType() eeType { return m.valueType }
 
 type eeReflectMapType struct {
 	eeAnyType
