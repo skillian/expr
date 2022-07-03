@@ -4,472 +4,549 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"math/bits"
-	"strings"
+	"reflect"
 
 	"github.com/skillian/ctxutil"
 )
 
+var (
+	// ErrNotFound indicates something wasn't found; it should be
+	// wrapped in another error that provides more context.
+	ErrNotFound = errors.New("not found")
+
+	// ErrInvalidType indicates that a value of the incorrect type
+	// was found.
+	ErrInvalidType = errors.New("invalid type")
+)
+
+// Kind returns a non-generic "kind" of operation corresponding
+// to the generic Expr implementation.
+type Kind uint
+
+const (
+	// NoKind is an invalid Kind that is checked for debugging.
+	NoKind Kind = iota
+	ConstKind
+	VarKind
+	NotKind
+	EqKind
+	NeKind
+	GtKind
+	GeKind
+	LtKind
+	LeKind
+	AndKind
+	OrKind
+	AddKind
+
+	// CallKind indicates that an expression is a function call
+	CallKind
+)
+
+type AnyExpr interface {
+	EvalAny(context.Context) (any, error)
+	Kind() Kind
+}
+
 // Expr is a basic expression
-type Expr interface{}
-
-// Unary is a unary (single-operand) expression, for example the negation
-// operator.
-type Unary interface {
-	Operand() Expr
+type Expr[T any] interface {
+	AnyExpr
+	AsExpr() Expr[T]
+	Eval(context.Context) (T, error)
 }
 
-// Not negates its operand.
-type Not [1]Expr
+// Const wraps a value into a constant expression.
+func Const[T any](value T) ConstExpr[T] { return ConstExpr[T]{V: value} }
 
-func (x Not) Operand() Expr { return x[0] }
-
-func (x Not) String() string { return buildString(x) }
-
-func (x Not) appendString(sb *strings.Builder) {
-	sb.WriteString("(not ")
-	appendString(sb, x[0])
-	sb.WriteByte(')')
+type AnyConstExpr interface {
+	AnyValue() any
 }
 
-// Binary represents a binary (two-operand) expression such as addition in
-// a + b.
-type Binary interface {
-	Operands() [2]Expr
-}
-
-// Eq checks for equality (i.e. a == b)
-type Eq [2]Expr
-
-func (x Eq) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Eq) String() string { return buildString(x) }
-
-func (x Eq) appendString(sb *strings.Builder) { appendBinary(sb, "eq", x) }
-
-// Ne checks for inequality (i.e. a != b)
-type Ne [2]Expr
-
-func (x Ne) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Ne) String() string { return buildString(x) }
-
-func (x Ne) appendString(sb *strings.Builder) { appendBinary(sb, "ne", x) }
-
-// Gt checks if the first operand is greater than the second (i.e. a > b)
-type Gt [2]Expr
-
-func (x Gt) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Gt) String() string { return buildString(x) }
-
-func (x Gt) appendString(sb *strings.Builder) { appendBinary(sb, "gt", x) }
-
-// Ge checks if the first operand is greater than or equal to the second
-// (i.e. a >= b)
-type Ge [2]Expr
-
-func (x Ge) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Ge) String() string { return buildString(x) }
-
-func (x Ge) appendString(sb *strings.Builder) { appendBinary(sb, "ge", x) }
-
-// Lt checks if the first operand is greater than the second (i.e. a < b)
-type Lt [2]Expr
-
-func (x Lt) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Lt) String() string { return buildString(x) }
-
-func (x Lt) appendString(sb *strings.Builder) { appendBinary(sb, "lt", x) }
-
-// Le checks if the first operand is less than or equal to the second
-// (i.e. a <= b)
-type Le [2]Expr
-
-func (x Le) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Le) String() string { return buildString(x) }
-
-func (x Le) appendString(sb *strings.Builder) { appendBinary(sb, "le", x) }
-
-// And performs a boolean AND operation of its two operands.
-//
-//	false && false == false
-//	false && true == false
-//	true && false == false
-//	true && true == true
-//
-type And [2]Expr
-
-func (x And) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x And) String() string { return buildString(x) }
-
-func (x And) appendString(sb *strings.Builder) { appendBinary(sb, "and", x) }
-
-// Or performs a boolean OR operation of its two operands.
-//
-//	false || false == false
-//	false || true == true
-//	true || false == true
-//	true || true == true
-//
-type Or [2]Expr
-
-func (x Or) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Or) String() string { return buildString(x) }
-
-func (x Or) appendString(sb *strings.Builder) { appendBinary(sb, "or", x) }
-
-// Add performs an arithmetic addition of its two operands (i.e. a + b)
-type Add [2]Expr
-
-func (x Add) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Add) String() string { return buildString(x) }
-
-func (x Add) appendString(sb *strings.Builder) { appendBinary(sb, "+", x) }
-
-// Sub performs an arithmetic addition of its two operands (i.e. a - b)
-type Sub [2]Expr
-
-func (x Sub) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Sub) String() string { return buildString(x) }
-
-func (x Sub) appendString(sb *strings.Builder) { appendBinary(sb, "-", x) }
-
-// Mul performs an arithmetic addition of its two operands (i.e. a * b)
-type Mul [2]Expr
-
-func (x Mul) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Mul) String() string { return buildString(x) }
-
-func (x Mul) appendString(sb *strings.Builder) { appendBinary(sb, "*", x) }
-
-// Div performs an arithmetic addition of its two operands (i.e. a /+ b)
-type Div [2]Expr
-
-func (x Div) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Div) String() string { return buildString(x) }
-
-func (x Div) appendString(sb *strings.Builder) { appendBinary(sb, "/", x) }
-
-// Mem selects a member of a source expression.
-type Mem [2]Expr
-
-func (x Mem) Operands() [2]Expr { return ([2]Expr)(x) }
-
-func (x Mem) String() string { return buildString(x) }
-
-func (x Mem) appendString(sb *strings.Builder) { appendBinary(sb, ".", x) }
-
-// Var is a placeholder for a runtime-determined value in an expression.
-type Var interface {
-	Expr
-
-	// Var differentiates the Var from an Expr but could just
-	// return itself
-	Var() Var
-}
-
-// Values is an ordered mapping of Vars to their values.
-type Values interface {
-	ctxutil.Keyer
-
-	// Get the value associated with the given variable.
-	Get(ctx context.Context, v Var) (interface{}, error)
-
-	// Set the value associated with the given variable.
-	Set(ctx context.Context, v Var, x interface{}) error
-
-	// Vars returns an iterator through the values' variables.  The
-	// returned iterator might be a VarValueIter.
-	Vars() VarIter
-}
-
-// ValuesContextKey is the key value to context.Context.Value to retrieve
-// Values from the context.
-func ValuesContextKey() interface{} { return (*Values)(nil) }
-
-// VarIter is a variable iterator.  Next must be called before Var to retrieve
-// a valid Var.
-type VarIter interface {
-	// Next retrieves the next Var from the VarIter.
-	Next(context.Context) error
-
-	// Var retrieves the variable from the iterator.
-	Var() Var
-}
-
-// VarValueIter is a VarIter that can also retrieve the value associated
-// with the current variable.
-type VarValueIter interface {
-	VarIter
-	VarValue(context.Context) VarValue
-}
-
-// valueList is an implementation of Values that keeps its keys
-// and values in slices that are scanned sequentially.
-type valueList struct {
-	keys []Var
-	vals []interface{}
+type ConstExpr[T any] struct {
+	V T
 }
 
 var _ interface {
-	Values
-} = (*valueList)(nil)
+	Expr[int]
+	AnyConstExpr
+} = ConstExpr[int]{}
 
-// VarValue pairs together a variable and its value
-type VarValue struct {
-	Var   Var
-	Value interface{}
+func (c ConstExpr[T]) AnyValue() any                            { return c.V }
+func (c ConstExpr[T]) AsExpr() Expr[T]                          { return c }
+func (c ConstExpr[T]) Eval(context.Context) (T, error)          { return c.V, nil }
+func (c ConstExpr[T]) EvalAny(ctx context.Context) (any, error) { return c.Eval(ctx) }
+func (c ConstExpr[T]) Kind() Kind                               { return ConstKind }
+
+type AnyUnaryExpr interface {
+	AnyOperand() AnyExpr
 }
 
-// NewValues creates Values from a sequence of Vars and their values.
-func NewValues(ps ...VarValue) Values {
-	capacity := 1 << bits.Len(uint(len(ps)))
-	vs := &valueList{
-		keys: make([]Var, len(ps), capacity),
-		vals: make([]interface{}, len(ps), capacity),
-	}
-	for i, p := range ps {
-		vs.keys[i] = p.Var
-		vs.vals[i] = p.Value
-	}
-	return vs
+type UnaryExpr[TOperand, TResult any] interface {
+	Expr[TResult]
+	AnyUnaryExpr
+	Operand() Expr[TOperand]
 }
 
-// ErrNotFound indicates something wasn't found; it should be wrapped
-// in another error that provides more context.
-var ErrNotFound = errors.New("not found")
+type NotExpr [1]Expr[bool]
 
-func (vs *valueList) ContextKey() interface{} { return ValuesContextKey() }
+func Not(e Expr[bool]) NotExpr { return NotExpr{e} }
 
-func (vs *valueList) Get(ctx context.Context, v Var) (interface{}, error) {
-	for i, k := range vs.keys {
-		if k == v {
-			return vs.vals[i], nil
-		}
-	}
-	return nil, ErrNotFound
+var _ interface {
+	UnaryExpr[bool, bool]
+} = NotExpr{}
+
+func (x NotExpr) AsExpr() Expr[bool]  { return x }
+func (x NotExpr) AnyOperand() AnyExpr { return x.Operand() }
+func (x NotExpr) Eval(ctx context.Context) (bool, error) {
+	v, err := x.Operand().Eval(ctx)
+	return !v, err
+}
+func (x NotExpr) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (c NotExpr) Kind() Kind                               { return NotKind }
+func (x NotExpr) Operand() Expr[bool]                      { return x[0] }
+
+type AnyBinaryExpr interface {
+	AnyOperands() [2]AnyExpr
 }
 
-func (vs *valueList) Set(ctx context.Context, v Var, x interface{}) error {
-	for i, k := range vs.keys {
-		if k == v {
-			vs.vals[i] = x
-			return nil
-		}
-	}
-	vs.keys = append(vs.keys, v)
-	vs.vals = append(vs.vals, x)
-	return nil
+type BinaryExpr[TLeft, TRight, TOut any] interface {
+	Expr[TOut]
+	AnyBinaryExpr
+	Operands() (left Expr[TLeft], right Expr[TRight])
 }
 
-type valueListIter struct {
-	vs *valueList
-	i  int
+type binarySameExpr[TIn, TOut any] [2]Expr[TIn]
+
+var _ interface {
+	BinaryExpr[int, int, bool]
+} = binarySameExpr[int, bool]{}
+
+func (x binarySameExpr[TIn, TOut]) AsExpr() Expr[TOut]                           { return x }
+func (x binarySameExpr[TIn, TOut]) AnyOperands() [2]AnyExpr                      { return anyOperands2(x.Operands()) }
+func (x binarySameExpr[TIn, TOut]) Eval(ctx context.Context) (y TOut, err error) { return }
+func (x binarySameExpr[TIn, TOut]) EvalAny(ctx context.Context) (any, error)     { return nil, nil }
+func (c binarySameExpr[TIn, TOut]) Kind() Kind                                   { return NoKind }
+func (x binarySameExpr[TIn, TOut]) Operands() (left, right Expr[TIn])            { return x[0], x[1] }
+
+// Eqer can compare if two values are "equal"
+type Eqer[T any] interface {
+	Eq(ctx context.Context, a, b T) (bool, error)
 }
 
-func (vs *valueList) Vars() VarIter { return &valueListIter{vs, 0} }
-
-func (vli *valueListIter) Next(context.Context) error {
-	if vli.i >= len(vli.vs.keys) {
-		return io.EOF
-	}
-	vli.i++
-	return nil
+func MakeEqer[T any](f func(ctx context.Context, a, b T) (bool, error)) Eqer[T] {
+	return EqerFunc[T](f)
 }
 
-func (vli *valueListIter) Reset(context.Context) error {
-	vli.i = 0
-	return nil
+type EqerFunc[T any] func(ctx context.Context, a, b T) (bool, error)
+
+func (f EqerFunc[T]) Eq(ctx context.Context, a, b T) (bool, error) {
+	return f(ctx, a, b)
 }
 
-func (vli *valueListIter) Var() Var {
-	return vli.vs.keys[vli.i-1]
-}
+func EqerContextKey[T any]() interface{} { return (*Eqer[T])(nil) }
 
-func (vli *valueListIter) VarValue(context.Context) VarValue {
-	return VarValue{
-		Var:   vli.vs.keys[vli.i-1],
-		Value: vli.vs.vals[vli.i-1],
-	}
-}
-
-type noValues struct{}
-
-// NoValues returns a dummy Values that holds no values and cannot hold
-// any values.
-func NoValues() Values { return noValues{} }
-
-func (noValues) ContextKey() interface{} { return ValuesContextKey() }
-func (noValues) Get(context.Context, Var) (interface{}, error) {
-	return nil, ErrNotFound
-}
-func (noValues) Set(context.Context, Var, interface{}) error {
-	return ErrNotFound
-}
-func (noValues) Vars() VarIter                     { return noValues{} }
-func (noValues) Next(context.Context) error        { return io.EOF }
-func (noValues) Var() Var                          { return nil }
-func (noValues) VarValue(context.Context) VarValue { return VarValue{} }
-
-type varValueIter struct {
-	Values
-	VarIter
-}
-
-// EachVarValue iterates through the values and calls f with each Var and the
-// value associated with that Var.
-func EachVarValue(ctx context.Context, vs Values, f func(Var, interface{}) error) error {
-	vvi := VarValueIterOf(vs)
-	for {
-		err := vvi.Next(ctx)
-		if err == nil {
-			vv := vvi.VarValue(ctx)
-			err = f(vv.Var, vv.Value)
-		}
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-	}
-}
-
-// MakeVarValueSlice makes a []VarValue slice from the vars and values in
-// vs.
-func MakeVarValueSlice(ctx context.Context, vs Values) ([]VarValue, error) {
-	const arbitraryCapacity = 8
-	vvs := make([]VarValue, arbitraryCapacity)
-	err := EachVarValue(ctx, vs, func(v Var, i interface{}) error {
-		vvs = append(vvs, VarValue{v, i})
-		return nil
-	})
+func eqExprHelper[T any](ctx context.Context, a, b Expr[T]) (bool, error) {
+	eqer, err := ifaceFromCtx[Eqer[T]](ctx)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"failed to create VarValue slice from %[1]v "+
-				"(type: %[1]T): %[2]w",
-			vs, err,
+		return false, err
+	}
+	left, right, err := eval2(ctx, a, b)
+	if err != nil {
+		return false, err
+	}
+	return eqer.Eq(ctx, left, right)
+}
+
+type EqExpr[T any] binarySameExpr[T, bool]
+
+func Eq[T any](a, b Expr[T]) EqExpr[T] { return EqExpr[T]{a, b} }
+
+var _ interface {
+	BinaryExpr[int, int, bool]
+} = EqExpr[int]{}
+
+func (x EqExpr[T]) AsExpr() Expr[bool]      { return x }
+func (x EqExpr[T]) AnyOperands() [2]AnyExpr { return anyOperands2(x.Operands()) }
+func (x EqExpr[T]) Eval(ctx context.Context) (bool, error) {
+	left, right := x.Operands()
+	return eqExprHelper(ctx, left, right)
+}
+func (x EqExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (x EqExpr[T]) Kind() Kind                               { return EqKind }
+func (x EqExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+
+type NeExpr[T any] binarySameExpr[T, bool]
+
+func Ne[T any](a, b Expr[T]) NeExpr[T] { return NeExpr[T]{a, b} }
+
+var _ interface {
+	BinaryExpr[int, int, bool]
+} = NeExpr[int]{}
+
+func (x NeExpr[T]) AnyOperands() [2]AnyExpr { return anyOperands2(x.Operands()) }
+func (x NeExpr[T]) AsExpr() Expr[bool]      { return x }
+func (x NeExpr[T]) Eval(ctx context.Context) (bool, error) {
+	left, right := x.Operands()
+	eq, err := eqExprHelper(ctx, left, right)
+	return !eq, err
+}
+func (x NeExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (x NeExpr[T]) Kind() Kind                               { return NeKind }
+func (x NeExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+
+type Cmper[T any] interface {
+	Cmp(ctx context.Context, a, b T) (int, error)
+}
+
+func CmperContextKey[T any]() interface{} { return (*Cmper[T])(nil) }
+
+func cmpExprHelper[T any](ctx context.Context, a, b Expr[T]) (int, error) {
+	cmper, err := ifaceFromCtx[Cmper[T]](ctx)
+	if err != nil {
+		return 0, err
+	}
+	left, right, err := eval2(ctx, a, b)
+	if err != nil {
+		return 0, err
+	}
+	return cmper.Cmp(ctx, left, right)
+}
+
+type GtExpr[T comparable] binarySameExpr[T, bool]
+
+func Gt[T comparable](a, b Expr[T]) GtExpr[T] { return GtExpr[T]{a, b} }
+
+var _ interface {
+	BinaryExpr[int, int, bool]
+} = GtExpr[int]{}
+
+func (x GtExpr[T]) AnyOperands() [2]AnyExpr { return anyOperands2(x.Operands()) }
+func (x GtExpr[T]) AsExpr() Expr[bool]      { return x }
+func (x GtExpr[T]) Eval(ctx context.Context) (bool, error) {
+	left, right := x.Operands()
+	cmp, err := cmpExprHelper(ctx, left, right)
+	return cmp > 0, err
+}
+func (x GtExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (x GtExpr[T]) Kind() Kind                               { return GtKind }
+func (x GtExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+
+type GeExpr[T comparable] binarySameExpr[T, bool]
+
+func Ge[T comparable](a, b Expr[T]) GeExpr[T] { return GeExpr[T]{a, b} }
+
+var _ interface {
+	BinaryExpr[int, int, bool]
+} = GeExpr[int]{}
+
+func (x GeExpr[T]) AnyOperands() [2]AnyExpr { return anyOperands2(x.Operands()) }
+func (x GeExpr[T]) AsExpr() Expr[bool]      { return x }
+func (x GeExpr[T]) Eval(ctx context.Context) (bool, error) {
+	left, right := x.Operands()
+	cmp, err := cmpExprHelper(ctx, left, right)
+	return cmp >= 0, err
+}
+func (x GeExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (x GeExpr[T]) Kind() Kind                               { return GeKind }
+func (x GeExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+
+type LtExpr[T comparable] binarySameExpr[T, bool]
+
+func Lt[T comparable](a, b Expr[T]) LtExpr[T] { return LtExpr[T]{a, b} }
+
+var _ interface {
+	BinaryExpr[int, int, bool]
+} = LtExpr[int]{}
+
+func (x LtExpr[T]) AnyOperands() [2]AnyExpr { return anyOperands2(x.Operands()) }
+func (x LtExpr[T]) AsExpr() Expr[bool]      { return x }
+func (x LtExpr[T]) Eval(ctx context.Context) (bool, error) {
+	left, right := x.Operands()
+	cmp, err := cmpExprHelper(ctx, left, right)
+	return cmp > 0, err
+}
+func (x LtExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (x LtExpr[T]) Kind() Kind                               { return LtKind }
+func (x LtExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+
+type LeExpr[T comparable] binarySameExpr[T, bool]
+
+func Le[T comparable](a, b Expr[T]) LeExpr[T] { return LeExpr[T]{a, b} }
+
+var _ interface {
+	BinaryExpr[int, int, bool]
+} = LeExpr[int]{}
+
+func (x LeExpr[T]) AnyOperands() [2]AnyExpr { return anyOperands2(x.Operands()) }
+func (x LeExpr[T]) AsExpr() Expr[bool]      { return x }
+func (x LeExpr[T]) Eval(ctx context.Context) (bool, error) {
+	left, right := x.Operands()
+	cmp, err := cmpExprHelper(ctx, left, right)
+	return cmp > 0, err
+}
+func (x LeExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (x LeExpr[T]) Kind() Kind                               { return LeKind }
+func (x LeExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+
+type AndExpr binarySameExpr[bool, bool]
+
+func And(a, b Expr[bool]) AndExpr { return AndExpr{a, b} }
+
+var _ interface {
+	BinaryExpr[bool, bool, bool]
+} = AndExpr{}
+
+func (x AndExpr) AnyOperands() [2]AnyExpr { return anyOperands2(x.Operands()) }
+func (x AndExpr) AsExpr() Expr[bool]      { return x }
+func (x AndExpr) Eval(ctx context.Context) (bool, error) {
+	a, b := x.Operands()
+	left, right, err := eval2(ctx, a, b)
+	return left && right, err
+}
+func (x AndExpr) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (x AndExpr) Kind() Kind                               { return AndKind }
+func (x AndExpr) Operands() (left, right Expr[bool])       { return x[0], x[1] }
+
+type OrExpr binarySameExpr[bool, bool]
+
+func Or(a, b Expr[bool]) OrExpr { return OrExpr{a, b} }
+
+var _ interface {
+	BinaryExpr[bool, bool, bool]
+} = OrExpr{}
+
+func (x OrExpr) AnyOperands() [2]AnyExpr { return anyOperands2(x.Operands()) }
+func (x OrExpr) AsExpr() Expr[bool]      { return x }
+func (x OrExpr) Eval(ctx context.Context) (bool, error) {
+	a, b := x.Operands()
+	left, right, err := eval2(ctx, a, b)
+	return left || right, err
+}
+func (x OrExpr) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
+func (x OrExpr) Kind() Kind                               { return OrKind }
+func (x OrExpr) Operands() (left, right Expr[bool])       { return x[0], x[1] }
+
+// Added adds an addend to an augend and returns a result.
+type Adder[TAugend, TAddend, TResult any] interface {
+	Add(context.Context, TAugend, TAddend) (TResult, error)
+}
+
+// AdderFunc implements Adder via a wrapped function.
+type AdderFunc[TAugend, TAddend, TResult any] func(context.Context, TAugend, TAddend) (TResult, error)
+
+func MakeAdder[TAugend, TAddend, TResult any](f func(context.Context, TAugend, TAddend) (TResult, error)) Adder[TAugend, TAddend, TResult] {
+	return AdderFunc[TAugend, TAddend, TResult](f)
+}
+
+func (f AdderFunc[TAugend, TAddend, TResult]) Add(ctx context.Context, a TAugend, b TAddend) (TResult, error) {
+	return f(ctx, a, b)
+}
+
+type AddExpr[TAugend, TAddend, TResult any] struct {
+	// note that "augend" is an obsolete term, but I'm using it
+	// here because arithmetic can be performed on different types
+	// e.g. a date plus a duration yields another date.  A date
+	// minus a date yields a duration, etc.
+
+	// Augend is the number-like object to be augmented by the
+	// addend.
+	Augend Expr[TAugend]
+
+	// Addend is the number-like object to be added to the augend.
+	Addend Expr[TAddend]
+}
+
+func Add[TAugend, TAddend, TResult any](a Expr[TAugend], b Expr[TAddend], ar Adder[TAugend, TAddend, TResult]) AddExpr[TAugend, TAddend, TResult] {
+	return AddExpr[TAugend, TAddend, TResult]{a, b}
+}
+
+var _ interface {
+	BinaryExpr[int, int, int]
+} = AddExpr[int, int, int]{}
+
+func (x AddExpr[TAugend, TAddend, TResult]) AnyOperands() [2]AnyExpr {
+	return anyOperands2(x.Operands())
+}
+func (x AddExpr[TAugend, TAddend, TResult]) AsExpr() Expr[TResult] { return x }
+func (x AddExpr[TAugend, TAddend, TResult]) Eval(ctx context.Context) (TResult, error) {
+	adder, err := ifaceFromCtx[Adder[TAugend, TAddend, TResult]](ctx)
+	if err != nil {
+		var res TResult
+		return res, err
+	}
+	a, b := x.Operands()
+	left, right, err := eval2(ctx, a, b)
+	if err != nil {
+		var res TResult
+		return res, err
+	}
+	return adder.Add(ctx, left, right)
+}
+func (x AddExpr[TAugend, TAddend, TResult]) EvalAny(ctx context.Context) (any, error) {
+	return x.Eval(ctx)
+}
+func (x AddExpr[TAugend, TAddend, TResult]) Kind() Kind { return AddKind }
+func (x AddExpr[TAugend, TAddend, TResult]) Operands() (left Expr[TAugend], right Expr[TAddend]) {
+	return x.Augend, x.Addend
+}
+
+// AnyFunc
+type AnyFunc interface {
+	Body() AnyExpr
+	Vars() []AnyVar
+}
+
+// Func1x1 is a function with one input and one output.  Its parameter
+// variable is returned by the V0 method.
+type Func1x1[T0, TResult any] struct {
+	// Body is the expression body that may (or may not) use the
+	// parameter to the function, V0, to calculate its result.
+	Body Expr[TResult]
+
+	// V0 is the first parameter to the function
+	V0 Var[T0]
+}
+
+// NewFunc1x1 is a utility function that can create a Func1x1.  The
+// factory function is passed in the
+func NewFunc1x1[T0, TResult any](factory func(v Var[T0]) Expr[TResult]) (f Func1x1[T0, TResult]) {
+	f.V0 = &ptrVar[T0]{}
+	f.Body = factory(f.V0)
+	return f
+}
+
+type Call1x1Expr[T0, TResult any] struct {
+	Func Func1x1[T0, TResult]
+	V0   Expr[T0]
+}
+
+func Call1x1[T0, TResult any](ctx context.Context, f Func1x1[T0, TResult], v0 Expr[T0]) Call1x1Expr[T0, TResult] {
+	return Call1x1Expr[T0, TResult]{Func: f, V0: v0}
+}
+
+var _ interface {
+	UnaryExpr[int, string]
+} = Call1x1Expr[int, string]{Func1x1[int, string]{}, Const(0)}
+
+func (c Call1x1Expr[T0, T1]) AnyOperand() AnyExpr { return c.Operand() }
+func (c Call1x1Expr[T0, T1]) AsExpr() Expr[T1]    { return c }
+func (c Call1x1Expr[T0, T1]) Eval(ctx context.Context) (r0 T1, err error) {
+	v0, err := c.Operand().Eval(ctx)
+	if err != nil {
+		return r0, err
+	}
+	return c.Func.Body.Eval(ctxutil.WithValue(ctx, c.Func.V0, v0))
+}
+func (c Call1x1Expr[T0, T1]) EvalAny(ctx context.Context) (any, error) { return c.Eval(ctx) }
+func (c Call1x1Expr[T0, T1]) Kind() Kind                               { return CallKind }
+func (c Call1x1Expr[T0, T1]) Operand() Expr[T0]                        { return c.V0 }
+
+type AnyVar interface {
+	AnyExpr
+	AnyVar() AnyVar
+}
+
+type Var[T any] interface {
+	AnyVar
+	Expr[T]
+	Var() Var[T]
+}
+
+type ptrVar[T any] struct{ _ byte }
+
+func (v *ptrVar[T]) AsExpr() Expr[T]                          { return v }
+func (v *ptrVar[T]) AnyVar() AnyVar                           { return v }
+func (v *ptrVar[T]) EvalAny(ctx context.Context) (any, error) { return v.Eval(ctx) }
+func (v *ptrVar[T]) Eval(ctx context.Context) (T, error)      { return EvalVar(ctx, v.Var()) }
+func (v *ptrVar[T]) Kind() Kind                               { return VarKind }
+func (v *ptrVar[T]) Var() Var[T]                              { return v }
+
+func (v *ptrVar[T]) GoString() string {
+	return fmt.Sprintf("%[1]T(%[1]p)", v)
+}
+
+func EvalVar[T any](ctx context.Context, va Var[T]) (t T, err error) {
+	v := ctxutil.Value(ctx, va)
+	if v == nil {
+		return t, ErrNotFound
+	}
+	t, ok := v.(T)
+	if !ok {
+		return t, fmt.Errorf(
+			"%[1]w: expected %[2]v, but actual: "+
+				"%[3]v (type: %[3]T)",
+			ErrInvalidType, reflect.TypeOf(&t).Elem(), v,
 		)
 	}
-	return vvs, nil
+	return t, nil
 }
 
-// VarValueIterOf creates a VarValueIter from the values.  If the Values'
-// Vars function already returns a VarValueIter implementation, that
-// implementation is returned directly.  If the implementation is only a
-// VarIter, a wrapper is returned that implements VarValueIter by calling
-// Get for each Var returned by the iterator.
-func VarValueIterOf(vs Values) VarValueIter {
-	vi := vs.Vars()
-	if vvi, ok := vi.(VarValueIter); ok {
-		return vvi
+func eval2[T0, T1 any](ctx context.Context, e0 Expr[T0], e1 Expr[T1]) (v0 T0, v1 T1, err error) {
+	v0, err = e0.Eval(ctx)
+	if err == nil {
+		v1, err = e1.Eval(ctx)
 	}
-	return varValueIter{vs, vi}
+	return
 }
 
-func (vvi varValueIter) VarValue(ctx context.Context) VarValue {
-	va := vvi.Var()
-	v, _ := vvi.Get(ctx, va)
-	return VarValue{Var: va, Value: v}
-}
+func anyOperands2[T0, T1 any](e0 Expr[T0], e1 Expr[T1]) [2]AnyExpr { return [2]AnyExpr{e0, e1} }
 
-func buildString(x interface{}) string {
-	sb := strings.Builder{}
-	appendString(&sb, x)
-	return sb.String()
-}
-
-func appendString(sb *strings.Builder, x interface{}) {
-	switch x := x.(type) {
-	case interface{ appendString(sb *strings.Builder) }:
-		x.appendString(sb)
-	default:
-		sb.WriteString(fmt.Sprint(x))
+func ifaceFromCtx[T any](ctx context.Context) (T, error) {
+	t, ok := ctx.Value((*T)(nil)).(T)
+	if !ok {
+		return t, fmt.Errorf(
+			"%w: failed to get %v from context",
+			ErrNotFound, reflect.TypeOf(&t).Elem(),
+		)
 	}
+	return t, nil
 }
 
-func appendBinary(sb *strings.Builder, op string, b Binary) {
-	ops := b.Operands()
-	sb.WriteByte('(')
-	sb.WriteString(op)
-	sb.WriteByte(' ')
-	appendString(sb, ops[0])
-	sb.WriteByte(' ')
-	appendString(sb, ops[1])
-	sb.WriteByte(')')
+// ErrorPexpectActual creates an ErrInvalidType from a pointer to an
+// expected type and a value of the actual type.  A pointer to the
+// expected type must be passed so that interface types can be expected.
+func ErrorPexpectActual(expect, actual interface{}) error {
+	return fmt.Errorf(
+		"%[1]w: expected %[2]v value, but actual: %[3]v (type: %[3]T)",
+		ErrInvalidType, reflect.TypeOf(expect).Elem(), actual,
+	)
 }
 
-// Operands gets the operands of the given expression as a slice.
-// If the expression has no operands, nil is returned.
-func Operands(e Expr) []Expr {
-	switch e := e.(type) {
-	case Unary:
-		return []Expr{e.Operand()}
-	case Binary:
-		ops := e.Operands()
-		return ops[:]
-	case interface{ Operands() []Expr }:
-		return e.Operands()
-	}
-	return nil
-}
-
-// Walk the expression tree, calling f(e) with the expression when
-// "entering" the expression and f(nil) when "exiting" an expression.
+// WalkFunc is used by Walk when traversing an expression tree.  It is
+// called by Walk with a non-nil expression when entering an expression
+// and with nil when exiting.  For example, the following expression
+// tree:
 //
-// For example, Add{1, 2} would result in the following calls to f:
+//	Add(Const(1), Const(2))
 //
-//	f(Add{1, 2})
-//	f(1)
-//	f(nil)
-//	f(2)
-//	f(nil)
-//	f(nil)
+//would result in the following call stack:
 //
-func Walk(e Expr, f func(Expr) bool, options ...WalkOption) bool {
-	var cfg walkConfig
-	for _, opt := range options {
-		opt(&cfg)
-	}
+//	f(AddExpr[int, int, int]{...})
+//	f(ConstExpr[int]{1})
+//	f(nil)	// exiting Const(1)
+//	f(ConstExpr[int]{2})
+//	f(nil)	// exiting Const(2)
+//	f(nil)	// exiting Add(...)
+//
+type WalkFunc func(e AnyExpr) bool
+
+// Walk the expression tree, e, with WalkFunc, f.  See WalkFunc's
+// documention for more info.
+func Walk(e AnyExpr, f WalkFunc) bool {
 	if !f(e) {
 		return false
 	}
-	ops := Operands(e)
-	if cfg.flags&walkBackwards == walkBackwards {
-		for i := len(ops) - 1; i >= 0; i-- {
-			Walk(ops[i], f, options...)
+	switch e := e.(type) {
+	case AnyUnaryExpr:
+		if !Walk(e.AnyOperand(), f) {
+			return false
 		}
-	} else {
-		for _, op := range ops {
-			Walk(op, f)
+	case AnyBinaryExpr:
+		for _, e := range e.AnyOperands() {
+			if !Walk(e, f) {
+				return false
+			}
 		}
 	}
 	return f(nil)
 }
-
-type walkConfig struct {
-	flags walkFlag
-}
-
-type walkFlag uint8
-
-const (
-	walkBackwards walkFlag = 1 << iota
-)
-
-type WalkOption func(c *walkConfig)
-
-var WalkOperandsBackwards = WalkOption(func(c *walkConfig) {
-	c.flags |= walkBackwards
-})
