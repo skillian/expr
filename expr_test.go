@@ -1,7 +1,6 @@
 package expr_test
 
 import (
-	"context"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -17,14 +16,12 @@ type exprTest struct {
 	errstr string
 }
 
-var intAdder = expr.Adder[int, int, int](expr.AdderFunc[int, int, int](func(ctx context.Context, a, b int) (int, error) {
-	return a + b, nil
-}))
+var intAdder = expr.DefaultAdder[int]()
 
 var exprTests = []exprTest{
 	{e: expr.Add(
-		expr.Const(1),
-		expr.Const(2),
+		expr.Const(1).AsExpr(),
+		expr.Const(2).AsExpr(),
 		intAdder,
 	), expect: 3},
 }

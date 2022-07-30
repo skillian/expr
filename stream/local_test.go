@@ -11,6 +11,7 @@ import (
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/expr"
 	"github.com/skillian/expr/stream"
+	"github.com/skillian/logging"
 )
 
 type localStreamTest struct {
@@ -27,32 +28,41 @@ func must[T any](v T, err error) T {
 }
 
 var (
-	intEq = expr.MakeEqer(func(ctx context.Context, a, b int) (bool, error) {
-		return a == b, nil
-	})
-	intAdder = expr.MakeAdder(func(ctx context.Context, a, b int) (int, error) {
-		return a + b, nil
-	})
+	logger = logging.GetLogger(
+		stream.PkgName,
+		logging.LoggerLevel(logging.VerboseLevel),
+	)
+
+	intEq            = expr.DefaultEqer[int]()
+	intAdder         = expr.DefaultAdder[int]()
 	localStreamTests = []localStreamTest{
 		{factory: func(ctx context.Context) stream.AnyStreamer {
 			st := stream.SliceOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9).AsStreamer()
-			return must(stream.Filter(ctx, st, expr.NewFunc1x1(func(v expr.Var[int]) expr.Expr[bool] {
-				return expr.Eq(
-					expr.Add(
-						v.AsExpr(),
-						expr.Const(1).AsExpr(),
-						intAdder,
-					).AsExpr(),
-					expr.Const(2).AsExpr(),
-				)
+			st = must(stream.Map(ctx, st, expr.NewFunc1x1(func(v expr.Var[int]) expr.Expr[int] {
+				return expr.Add(v.AsExpr(), v.AsExpr(), intAdder).AsExpr()
 			})))
-		}, expect: []any{1}},
+			return must(stream.Filter(ctx, st, expr.NewFunc1x1(func(v expr.Var[int]) expr.Expr[bool] {
+				oneExpr := expr.Const(1).AsExpr()
+				addExpr := expr.Add(v.AsExpr(), oneExpr, intAdder).AsExpr()
+				threeExpr := expr.Const(3).AsExpr()
+				return expr.Eq(addExpr, threeExpr)
+			})))
+		}, expect: []any{2}},
 	}
 )
 
 func TestLocalStream(t *testing.T) {
 	for _, tc := range localStreamTests {
 		t.Run(fmt.Sprint(rand.Int()), func(t *testing.T) {
+			defer logging.TestingHandler(
+				logger, t,
+				logging.HandlerFormatter(
+					logging.DefaultFormatter{},
+				),
+				logging.HandlerLevel(
+					logging.VerboseLevel,
+				),
+			)()
 			startCtx := ctxutil.Flatten(
 				ctxutil.WithValue(
 					ctxutil.WithValue(

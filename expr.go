@@ -43,12 +43,14 @@ const (
 	CallKind
 )
 
+// AnyExpr is a non-generic expression.
 type AnyExpr interface {
 	EvalAny(context.Context) (any, error)
 	Kind() Kind
+	Type() reflect.Type
 }
 
-// Expr is a basic expression
+// Expr is any expression that evaluates to a value of a specific type.
 type Expr[T any] interface {
 	AnyExpr
 	AsExpr() Expr[T]
@@ -58,11 +60,16 @@ type Expr[T any] interface {
 // Const wraps a value into a constant expression.
 func Const[T any](value T) ConstExpr[T] { return ConstExpr[T]{V: value} }
 
+// AnyConstExpr is any expression that evaluates to a constant value
 type AnyConstExpr interface {
+	// AnyValue retrieves the constant's value as an untyped
+	// interface{}
 	AnyValue() any
 }
 
+// ConstExpr is a constant expression with a specific type.
 type ConstExpr[T any] struct {
+	// V is the inner constant value
 	V T
 }
 
@@ -76,19 +83,27 @@ func (c ConstExpr[T]) AsExpr() Expr[T]                          { return c }
 func (c ConstExpr[T]) Eval(context.Context) (T, error)          { return c.V, nil }
 func (c ConstExpr[T]) EvalAny(ctx context.Context) (any, error) { return c.Eval(ctx) }
 func (c ConstExpr[T]) Kind() Kind                               { return ConstKind }
+func (c ConstExpr[T]) Type() reflect.Type                       { return reflect.TypeOf(&c.V).Elem() }
 
+// AnyUnaryExpr is any expression with a single operand
 type AnyUnaryExpr interface {
 	AnyOperand() AnyExpr
 }
 
+// UnaryExpr is a typed unary expression
 type UnaryExpr[TOperand, TResult any] interface {
 	Expr[TResult]
 	AnyUnaryExpr
 	Operand() Expr[TOperand]
 }
 
+var boolType = reflect.TypeOf(false)
+
+// NotExpr is a boolean NOT which evaluates to the opposite of its
+// operand.
 type NotExpr [1]Expr[bool]
 
+// Not returns a NotExpr of a boolean operand
 func Not(e Expr[bool]) NotExpr { return NotExpr{e} }
 
 var _ interface {
@@ -102,19 +117,26 @@ func (x NotExpr) Eval(ctx context.Context) (bool, error) {
 	return !v, err
 }
 func (x NotExpr) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
-func (c NotExpr) Kind() Kind                               { return NotKind }
+func (x NotExpr) Kind() Kind                               { return NotKind }
 func (x NotExpr) Operand() Expr[bool]                      { return x[0] }
+func (x NotExpr) Type() reflect.Type                       { return boolType }
 
+// AnyBinaryExpr is any expression with two operands that resolves to
+// a single value.
 type AnyBinaryExpr interface {
 	AnyOperands() [2]AnyExpr
 }
 
+// BinaryExpr is a typed binary expression that resolves to a single
+// value.
 type BinaryExpr[TLeft, TRight, TOut any] interface {
 	Expr[TOut]
 	AnyBinaryExpr
 	Operands() (left Expr[TLeft], right Expr[TRight])
 }
 
+// binarySameExpr is a helper type whose input parameters are of the
+// same type, but whose output can be different.
 type binarySameExpr[TIn, TOut any] [2]Expr[TIn]
 
 var _ interface {
@@ -127,22 +149,40 @@ func (x binarySameExpr[TIn, TOut]) Eval(ctx context.Context) (y TOut, err error)
 func (x binarySameExpr[TIn, TOut]) EvalAny(ctx context.Context) (any, error)     { return nil, nil }
 func (c binarySameExpr[TIn, TOut]) Kind() Kind                                   { return NoKind }
 func (x binarySameExpr[TIn, TOut]) Operands() (left, right Expr[TIn])            { return x[0], x[1] }
+func (c binarySameExpr[TIn, TOut]) Type() reflect.Type {
+	var to TOut
+	return reflect.TypeOf(&to).Elem()
+}
 
 // Eqer can compare if two values are "equal"
 type Eqer[T any] interface {
 	Eq(ctx context.Context, a, b T) (bool, error)
 }
 
+// DefaultEqer returns a default equality checker for Go.
+func DefaultEqer[T comparable]() Eqer[T] {
+	return MakeEqer(func(ctx context.Context, a, b T) (bool, error) {
+		return a == b, nil
+	})
+}
+
+// MakeEqer creates an Eqer[T] from a function.
 func MakeEqer[T any](f func(ctx context.Context, a, b T) (bool, error)) Eqer[T] {
 	return EqerFunc[T](f)
 }
 
+// EqerFunc implements the Eqer[T] interface via a function.
 type EqerFunc[T any] func(ctx context.Context, a, b T) (bool, error)
 
 func (f EqerFunc[T]) Eq(ctx context.Context, a, b T) (bool, error) {
 	return f(ctx, a, b)
 }
 
+// EqerContextKey returns a key that can be used to retrieve an Eqer[T]
+// implementation from a context.Context.
+//
+//	eqer, ok := ctx.Value(EqerContextKey[int]()).(Eqer[int])
+//
 func EqerContextKey[T any]() interface{} { return (*Eqer[T])(nil) }
 
 func eqExprHelper[T any](ctx context.Context, a, b Expr[T]) (bool, error) {
@@ -157,8 +197,10 @@ func eqExprHelper[T any](ctx context.Context, a, b Expr[T]) (bool, error) {
 	return eqer.Eq(ctx, left, right)
 }
 
+// EqExpr is an equality comparison expression.
 type EqExpr[T any] binarySameExpr[T, bool]
 
+// Eq returns an equality expression.
 func Eq[T any](a, b Expr[T]) EqExpr[T] { return EqExpr[T]{a, b} }
 
 var _ interface {
@@ -174,9 +216,12 @@ func (x EqExpr[T]) Eval(ctx context.Context) (bool, error) {
 func (x EqExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
 func (x EqExpr[T]) Kind() Kind                               { return EqKind }
 func (x EqExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+func (x EqExpr[T]) Type() reflect.Type                       { return boolType }
 
+// NeExpr is an inequality expression
 type NeExpr[T any] binarySameExpr[T, bool]
 
+// Ne creates and returns an inequality expression.
 func Ne[T any](a, b Expr[T]) NeExpr[T] { return NeExpr[T]{a, b} }
 
 var _ interface {
@@ -193,11 +238,18 @@ func (x NeExpr[T]) Eval(ctx context.Context) (bool, error) {
 func (x NeExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
 func (x NeExpr[T]) Kind() Kind                               { return NeKind }
 func (x NeExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+func (x NeExpr[T]) Type() reflect.Type                       { return boolType }
 
+// Cmper compares its operands.
 type Cmper[T any] interface {
 	Cmp(ctx context.Context, a, b T) (int, error)
 }
 
+// CmperContextKey can be used as a key to `context.Context.Value` to
+// retrieve an instance of the Cmper[T] from the context.
+//
+//	cmper, ok := ctx.Value(CmperContextKey[int]()).(Cmper[int])
+//
 func CmperContextKey[T any]() interface{} { return (*Cmper[T])(nil) }
 
 func cmpExprHelper[T any](ctx context.Context, a, b Expr[T]) (int, error) {
@@ -212,8 +264,10 @@ func cmpExprHelper[T any](ctx context.Context, a, b Expr[T]) (int, error) {
 	return cmper.Cmp(ctx, left, right)
 }
 
+// GtExpr is a greater than comparison.
 type GtExpr[T comparable] binarySameExpr[T, bool]
 
+// Gt returns a Greater than comparison.
 func Gt[T comparable](a, b Expr[T]) GtExpr[T] { return GtExpr[T]{a, b} }
 
 var _ interface {
@@ -230,9 +284,12 @@ func (x GtExpr[T]) Eval(ctx context.Context) (bool, error) {
 func (x GtExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
 func (x GtExpr[T]) Kind() Kind                               { return GtKind }
 func (x GtExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+func (x GtExpr[T]) Type() reflect.Type                       { return boolType }
 
+// GeExpr is a greater than expression.
 type GeExpr[T comparable] binarySameExpr[T, bool]
 
+// Ge creates a GeExpr with two operands.
 func Ge[T comparable](a, b Expr[T]) GeExpr[T] { return GeExpr[T]{a, b} }
 
 var _ interface {
@@ -249,9 +306,12 @@ func (x GeExpr[T]) Eval(ctx context.Context) (bool, error) {
 func (x GeExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
 func (x GeExpr[T]) Kind() Kind                               { return GeKind }
 func (x GeExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+func (x GeExpr[T]) Type() reflect.Type                       { return boolType }
 
+// LtExpr is a less than expression.
 type LtExpr[T comparable] binarySameExpr[T, bool]
 
+// Lt creates a LtExpr with two operands.
 func Lt[T comparable](a, b Expr[T]) LtExpr[T] { return LtExpr[T]{a, b} }
 
 var _ interface {
@@ -268,9 +328,12 @@ func (x LtExpr[T]) Eval(ctx context.Context) (bool, error) {
 func (x LtExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
 func (x LtExpr[T]) Kind() Kind                               { return LtKind }
 func (x LtExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+func (x LtExpr[T]) Type() reflect.Type                       { return boolType }
 
+// LtExpr is a less than expression.
 type LeExpr[T comparable] binarySameExpr[T, bool]
 
+// Lt creates a LtExpr with two operands.
 func Le[T comparable](a, b Expr[T]) LeExpr[T] { return LeExpr[T]{a, b} }
 
 var _ interface {
@@ -287,9 +350,12 @@ func (x LeExpr[T]) Eval(ctx context.Context) (bool, error) {
 func (x LeExpr[T]) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
 func (x LeExpr[T]) Kind() Kind                               { return LeKind }
 func (x LeExpr[T]) Operands() (left, right Expr[T])          { return x[0], x[1] }
+func (x LeExpr[T]) Type() reflect.Type                       { return boolType }
 
+// AndExpr is a logical AND expression.
 type AndExpr binarySameExpr[bool, bool]
 
+// And creates an AndExpr.
 func And(a, b Expr[bool]) AndExpr { return AndExpr{a, b} }
 
 var _ interface {
@@ -306,9 +372,12 @@ func (x AndExpr) Eval(ctx context.Context) (bool, error) {
 func (x AndExpr) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
 func (x AndExpr) Kind() Kind                               { return AndKind }
 func (x AndExpr) Operands() (left, right Expr[bool])       { return x[0], x[1] }
+func (x AndExpr) Type() reflect.Type                       { return boolType }
 
+// OrExpr is a logical OR expression.
 type OrExpr binarySameExpr[bool, bool]
 
+// Or creates an OrExpr.
 func Or(a, b Expr[bool]) OrExpr { return OrExpr{a, b} }
 
 var _ interface {
@@ -325,15 +394,42 @@ func (x OrExpr) Eval(ctx context.Context) (bool, error) {
 func (x OrExpr) EvalAny(ctx context.Context) (any, error) { return x.Eval(ctx) }
 func (x OrExpr) Kind() Kind                               { return OrKind }
 func (x OrExpr) Operands() (left, right Expr[bool])       { return x[0], x[1] }
+func (x OrExpr) Type() reflect.Type                       { return boolType }
 
-// Added adds an addend to an augend and returns a result.
+// Added adds an addend to an augend and returns a result.  Programming
+// languages sometimes allow operands of different types (e.g. adding
+// a duration to a time).
 type Adder[TAugend, TAddend, TResult any] interface {
 	Add(context.Context, TAugend, TAddend) (TResult, error)
+}
+
+// AdderContextKey returns a value that can be used as a key to
+// context.Context.Value to lookup an Adder implementation.
+//
+//	adder, ok := ctx.Value(AdderContextKey[int, int, int]()).(Adder[int, int, int])
+//
+func AdderContextKey[TAugend, TAddend, TResult any]() interface{} {
+	return (*Adder[TAddend, TAddend, TResult])(nil)
+}
+
+type numeric interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 |
+		~float32 | ~float64
+}
+
+// DefaultAdder is an Adder implementation that uses Go's built-in
+// behavior.
+func DefaultAdder[T numeric]() Adder[T, T, T] {
+	return MakeAdder(func(ctx context.Context, a, b T) (T, error) {
+		return a + b, nil
+	})
 }
 
 // AdderFunc implements Adder via a wrapped function.
 type AdderFunc[TAugend, TAddend, TResult any] func(context.Context, TAugend, TAddend) (TResult, error)
 
+// MakeAdder creates an Adder implementation from a function.
 func MakeAdder[TAugend, TAddend, TResult any](f func(context.Context, TAugend, TAddend) (TResult, error)) Adder[TAugend, TAddend, TResult] {
 	return AdderFunc[TAugend, TAddend, TResult](f)
 }
@@ -342,6 +438,7 @@ func (f AdderFunc[TAugend, TAddend, TResult]) Add(ctx context.Context, a TAugend
 	return f(ctx, a, b)
 }
 
+// AddExpr creates an add expression.
 type AddExpr[TAugend, TAddend, TResult any] struct {
 	// note that "augend" is an obsolete term, but I'm using it
 	// here because arithmetic can be performed on different types
@@ -389,15 +486,24 @@ func (x AddExpr[TAugend, TAddend, TResult]) Kind() Kind { return AddKind }
 func (x AddExpr[TAugend, TAddend, TResult]) Operands() (left Expr[TAugend], right Expr[TAddend]) {
 	return x.Augend, x.Addend
 }
-
-// AnyFunc
-type AnyFunc interface {
-	Body() AnyExpr
-	Vars() []AnyVar
+func (x AddExpr[TAugend, TAddend, TResult]) Type() reflect.Type {
+	var res TResult
+	return reflect.TypeOf(&res).Elem()
 }
 
-// Func1x1 is a function with one input and one output.  Its parameter
-// variable is returned by the V0 method.
+// AnyFunc is an interface common to any function
+type AnyFunc interface {
+	AnyBody() AnyExpr
+	AnyVars() []AnyVar
+}
+
+type Func1xAny1[TIn any] interface {
+	Var0() Var[TIn]
+}
+
+// Func1x1 is a function with one input and one output.  During a
+// function invocation, the operand result is mapped to the
+// variable, V0 which can be used in the function body.
 type Func1x1[T0, TResult any] struct {
 	// Body is the expression body that may (or may not) use the
 	// parameter to the function, V0, to calculate its result.
@@ -408,18 +514,29 @@ type Func1x1[T0, TResult any] struct {
 }
 
 // NewFunc1x1 is a utility function that can create a Func1x1.  The
-// factory function is passed in the
+// factory function is passed in the function parameter Var and must
+// return the function body expression.
 func NewFunc1x1[T0, TResult any](factory func(v Var[T0]) Expr[TResult]) (f Func1x1[T0, TResult]) {
 	f.V0 = &ptrVar[T0]{}
 	f.Body = factory(f.V0)
 	return f
 }
 
+func (f Func1x1[T0, TResult]) AnyBody() AnyExpr  { return f.Body }
+func (f Func1x1[T0, TResult]) AnyVars() []AnyVar { return []AnyVar{f.V0} }
+func (f Func1x1[T0, TResult]) Var0() Var[T0]     { return f.V0 }
+
+// Call1x1Expr is a function call expression of a Func1x1.
 type Call1x1Expr[T0, TResult any] struct {
+	// Func is the Func1x1 that this call expression is calling.
 	Func Func1x1[T0, TResult]
-	V0   Expr[T0]
+
+	// V0 is the expression passed in as the function call's
+	// operand.
+	V0 Expr[T0]
 }
 
+// Call1x1 creates a call expression that calls a Func1x1.
 func Call1x1[T0, TResult any](ctx context.Context, f Func1x1[T0, TResult], v0 Expr[T0]) Call1x1Expr[T0, TResult] {
 	return Call1x1Expr[T0, TResult]{Func: f, V0: v0}
 }
@@ -440,12 +557,17 @@ func (c Call1x1Expr[T0, T1]) Eval(ctx context.Context) (r0 T1, err error) {
 func (c Call1x1Expr[T0, T1]) EvalAny(ctx context.Context) (any, error) { return c.Eval(ctx) }
 func (c Call1x1Expr[T0, T1]) Kind() Kind                               { return CallKind }
 func (c Call1x1Expr[T0, T1]) Operand() Expr[T0]                        { return c.V0 }
+func (c Call1x1Expr[T0, T1]) Type() reflect.Type {
+	var t1 T1
+	return reflect.TypeOf(&t1).Elem()
+}
 
+// AnyVar is implemented by any variable expression.
 type AnyVar interface {
-	AnyExpr
 	AnyVar() AnyVar
 }
 
+// Var is a type-safe variable.
 type Var[T any] interface {
 	AnyVar
 	Expr[T]
@@ -460,6 +582,10 @@ func (v *ptrVar[T]) EvalAny(ctx context.Context) (any, error) { return v.Eval(ct
 func (v *ptrVar[T]) Eval(ctx context.Context) (T, error)      { return EvalVar(ctx, v.Var()) }
 func (v *ptrVar[T]) Kind() Kind                               { return VarKind }
 func (v *ptrVar[T]) Var() Var[T]                              { return v }
+func (v *ptrVar[T]) Type() reflect.Type {
+	var t T
+	return reflect.TypeOf(&t).Elem()
+}
 
 func (v *ptrVar[T]) GoString() string {
 	return fmt.Sprintf("%[1]T(%[1]p)", v)

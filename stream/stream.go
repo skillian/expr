@@ -2,7 +2,8 @@ package stream
 
 import (
 	"context"
-	"unsafe"
+	"fmt"
+	"reflect"
 
 	"github.com/skillian/expr"
 )
@@ -40,8 +41,6 @@ type Streamer[T any] interface {
 	Var() expr.Var[T]
 }
 
-func AsStreamer[T any](st Streamer[T]) Streamer[T] { return st }
-
 // AnyStreamer is a non-generic base implementation of Streamer
 type AnyStreamer interface {
 	AnyStream(context.Context) (AnyStream, error)
@@ -67,25 +66,63 @@ func Filter[T any](ctx context.Context, sr Streamer[T], f expr.Func1x1[T, bool])
 	return localFilterer[T]{source: sr, f: f}, nil
 }
 
-// Mapper applies a projection to values from a stream to produce
-// new values in a new stream.
-type Mapper[TIn, TOut any] interface {
+// StaticMapper maps from one form to another, but due to Go 1.18's
+// implementation of generics, can only map to a single target type.
+// To implement projections to different types, see the MapperBuilder
+// type.
+type StaticMapper[TIn, TOut any] interface {
 	Streamer[TIn]
 
 	Map(ctx context.Context, e expr.Func1x1[TIn, TOut]) (Streamer[TOut], error)
 }
 
+// MapperBuilder builds a Mapper into b with the given function
+type MapperBuilder[TIn any] interface {
+	BuildMapper(b Mapping, f expr.Func1xAny1[TIn]) error
+}
+
+type Mapping interface {
+	SetMapper(sr AnyStreamer) error
+}
+
+type mapping[TOut any] struct {
+	sr Streamer[TOut]
+}
+
+func (b *mapping[TOut]) SetMapper(sr AnyStreamer) error {
+	srOut, ok := sr.(Streamer[TOut])
+	if !ok {
+		return fmt.Errorf("mapped streamer must be %v", reflect.TypeOf(&srOut).Elem())
+	}
+	b.sr = srOut
+	return nil
+}
+
 // Map returns a Streamer that applies a projection, e, to sr's
 // elements.
 func Map[TIn, TOut any](ctx context.Context, sr Streamer[TIn], f expr.Func1x1[TIn, TOut]) (Streamer[TOut], error) {
-	if mr, ok := sr.(Mapper[TIn, TOut]); ok {
-		return mr.Map(ctx, f)
+	switch sr := sr.(type) {
+	case StaticMapper[TIn, TOut]:
+		return sr.Map(ctx, f)
+	case MapperBuilder[TIn]:
+		m := &mapping[TOut]{}
+		if err := sr.BuildMapper(m, f); err != nil {
+			var in TIn
+			var out TOut
+			return nil, fmt.Errorf(
+				"failed to build mapper from %v to %v: %w",
+				reflect.TypeOf(&in).Elem(),
+				reflect.TypeOf(&out).Elem(),
+				err,
+			)
+		}
+		return m.sr, nil
 	}
 	return &localMapper[TIn, TOut]{source: sr, f: f}, nil
 }
 
-func ifaceDataPtr(v interface{}) unsafe.Pointer {
-	// interface is {type, data}
-	d := *((*[2]unsafe.Pointer)(unsafe.Pointer(&v)))
-	return d[1]
+type Joiner[TOuter, TInner, TResult any] interface {
+	Streamer[TOuter]
+
+	Join(ctx context.Context)
 }

@@ -3,9 +3,19 @@ package stream
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/expr"
+	"github.com/skillian/logging"
+)
+
+const (
+	PkgName = "github.com/skillian/expr/stream"
+)
+
+var (
+	logger = logging.GetLogger(PkgName)
 )
 
 type localFilterer[T any] struct {
@@ -72,10 +82,9 @@ func (mr *localMapper[TIn, TOut]) Stream(ctx context.Context) (Stream[TOut], err
 	if err != nil {
 		return nil, err
 	}
-	return &localMap[TIn, TOut]{
+	return localMap[TIn, TOut]{
 		source: st,
-		f:      mr.f,
-		v:      mr.Var(),
+		mr:     mr,
 	}, nil
 }
 func (mr *localMapper[TIn, TOut]) AnyVar() expr.AnyVar { return mr.Var() }
@@ -93,29 +102,33 @@ func (v *localMapperVar[TIn, TOut]) Eval(ctx context.Context) (TOut, error) {
 }
 func (v *localMapperVar[TIn, TOut]) EvalAny(ctx context.Context) (any, error) { return v.Eval(ctx) }
 func (v *localMapperVar[TIn, TOut]) Var() expr.Var[TOut]                      { return v }
+func (v *localMapperVar[TIn, TOut]) Kind() expr.Kind                          { return expr.VarKind }
+func (v *localMapperVar[TIn, TOut]) Type() reflect.Type {
+	var out TOut
+	return reflect.TypeOf(&out).Elem()
+}
 
 type localMap[TIn, TOut any] struct {
 	source Stream[TIn]
-	f      expr.Func1x1[TIn, TOut]
-	v      expr.Var[TOut]
+	mr     *localMapper[TIn, TOut]
 }
 
-func (lm *localMap[TIn, TOut]) Next(ctx context.Context) (context.Context, error) {
+func (lm localMap[TIn, TOut]) Next(ctx context.Context) (context.Context, error) {
 	ctx, err := lm.source.Next(ctx)
 	if err != nil {
 		return nil, err
 	}
-	v := ctxutil.Value(ctx, lm.Var())
+	v := ctxutil.Value(ctx, lm.source.Var())
 	t, ok := v.(TIn)
 	if !ok {
 		return nil, expr.ErrorPexpectActual(&t, v)
 	}
-	res, err := expr.Call1x1(ctx, lm.f, expr.Const(t).AsExpr()).Eval(ctx)
+	res, err := expr.Call1x1(ctx, lm.mr.f, expr.Const(t).AsExpr()).Eval(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error from mapping %v: %w", lm.f, err)
+		return nil, fmt.Errorf("error from mapping %v: %w", lm.mr.f, err)
 	}
 	return ctxutil.WithValue(ctx, lm.Var(), res), nil
 }
 
-func (lm *localMap[TIn, TOut]) AnyVar() expr.AnyVar { return lm.Var() }
-func (lm *localMap[TIn, TOut]) Var() expr.Var[TOut] { return lm.v }
+func (lm localMap[TIn, TOut]) AnyVar() expr.AnyVar { return lm.Var() }
+func (lm localMap[TIn, TOut]) Var() expr.Var[TOut] { return lm.mr.Var() }

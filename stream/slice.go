@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"io"
+	"reflect"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/expr"
@@ -38,6 +39,11 @@ func (v sliceVar[T]) Eval(ctx context.Context) (T, error) {
 }
 func (v sliceVar[T]) EvalAny(ctx context.Context) (any, error) { return v.Eval(ctx) }
 func (v sliceVar[T]) Var() expr.Var[T]                         { return v }
+func (v sliceVar[T]) Kind() expr.Kind                          { return expr.VarKind }
+func (v sliceVar[T]) Type() reflect.Type {
+	var t T
+	return reflect.TypeOf(&t).Elem()
+}
 
 type sliceStream[T any] struct {
 	slice Slice[T]
