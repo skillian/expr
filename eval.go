@@ -29,16 +29,20 @@ func (t FloatTolerance) ContextKey() interface{} {
 
 // Eval evaluates the given expression.
 func Eval(ctx context.Context, e Expr, vs Values) (interface{}, error) {
-	eev := exprEvaluators.Get()
-	defer exprEvaluators.Put(eev)
-	ee := eev.(*exprEvaluator)
-	fc, ok := ctxutil.FromContextKey(ctx, (*funcCache)(nil)).(*funcCache)
+	fn, err := FuncOf(ctx, e, vs)
+	if err != nil {
+		return nil, err
+	}
+	return fn.Call(ctx, vs)
+}
+
+func FuncOf(ctx context.Context, e Expr, vs Values) (Func, error) {
+	fc, ok := ctxutil.Value(ctx, (*funcCache)(nil)).(*funcCache)
 	var fk funcKey
 	if ok {
 		fk = makeFuncKey(ctx, e, vs)
 		if fn, ok := fc.load(fk); ok {
-			ctx = ctxutil.AddToContext(ctx, ee)
-			return fn.Call(ctx, vs)
+			return fn, nil
 		}
 	}
 	fn, err := funcFromExpr(ctx, e, vs)
@@ -48,8 +52,25 @@ func Eval(ctx context.Context, e Expr, vs Values) (interface{}, error) {
 	if ok {
 		fn, _ = fc.loadOrStore(fk, fn)
 	}
-	ctx = ctxutil.AddToContext(ctx, ee)
-	return fn.Call(ctx, vs)
+	return fn, nil
+}
+
+// WithEvalContext adds an expression evaluator to the context and calls
+// f with the new context.
+//
+// This is a leaky implementation detail, with which I'm not yet sure
+// how to handle best.  Evaluating expressions currently uses a virtual
+// machine that is not safe for concurrent use.  The opFunc's Call
+// method
+func WithEvalContext[T any](ctx context.Context, state T, f func(ctx context.Context, state T) error) error {
+	_, ok := ctxutil.Value(ctx, (*exprEvaluator)(nil)).(*exprEvaluator)
+	if !ok {
+		eev := exprEvaluators.Get()
+		defer exprEvaluators.Put(eev)
+		ee := eev.(*exprEvaluator)
+		ctx = ctxutil.WithValue(ctx, ee.ContextKey(), eev)
+	}
+	return f(ctx, state)
 }
 
 var exprEvaluators = sync.Pool{
@@ -522,6 +543,9 @@ var (
 		eeType
 		eeNumType
 	} = &numType{timeDurationTypeImpl{}}
+	tupleType interface {
+		eeType
+	} = eeTupleType{}
 	float64Type interface {
 		eeType
 		eeNumType
@@ -544,6 +568,9 @@ var (
 		m.Store(reflect.TypeOf(int64(0)), int64Type)
 		m.Store(reflect.TypeOf(float64(0)), float64Type)
 		m.Store(reflect.TypeOf(string("")), stringType)
+		m.Store(reflect.TypeOf(time.Time{}), timeType)
+		m.Store(reflect.TypeOf(time.Duration(0)), timeDurationType)
+		m.Store(reflect.TypeOf(Tuple(nil)), tupleType)
 		m.Store(reflect.TypeOf((*big.Rat)(nil)), mathBigRatType)
 		return
 	}()
@@ -645,7 +672,12 @@ func eeTypeFromReflectType(rt reflect.Type) eeType {
 			copy(ert.mems, mems)
 			return ert, func(et eeType, rt reflect.Type) {}
 		}
-		panic("not implemented")
+		panic(fmt.Errorf(
+			"creating expression evaluator type "+
+				"information from %v is not "+
+				"implemented",
+			rt,
+		))
 	}
 	var key interface{} = rt
 	v, loaded := eeTypes.Load(key)
@@ -890,9 +922,8 @@ var _ interface {
 } = eeNumConvType{}
 
 var (
-	bigInt1        = big.NewInt(1)
-	bigInt2        = big.NewInt(2)
-	bigIntMaxInt64 = big.NewInt(math.MaxInt64)
+	bigInt1 = big.NewInt(1)
+	bigInt2 = big.NewInt(2)
 )
 
 func (eeNumConvType) conv(ee *exprEvaluator, t eeType) {
@@ -1094,6 +1125,59 @@ func (eeTimeType) typeCheck(e Expr, t2 eeType) eeType {
 		case timeDurationType:
 			return timeType
 		}
+	}
+	return nil
+}
+
+type eeTupleType struct{ eeAnyType }
+
+var _ interface {
+	eeType
+} = eeTupleType{}
+
+func (eeTupleType) eq(ee *exprEvaluator) bool {
+	_, _ = ee.stack.popType(), ee.stack.popType()
+	tupA := ee.stack.popAny().(Tuple)
+	tupB := ee.stack.popAny().(Tuple)
+	if len(tupA) != len(tupB) {
+		return false
+	}
+	eq := Eq{}
+	for i, va := range tupA {
+		// TODO: A better idea will probably be to "unpack"
+		// tuple equality checks when compiling expressions into
+		// something like:
+		//
+		//	And{
+		//		And{
+		//			Eq{a[0], b[0]},
+		//			Eq{a[1], b[1]},
+		//		},
+		//		Eq{a[2], b[2]},
+		//	}
+		//
+		eq[0], eq[1] = va, tupB[i]
+		ta := eeTypeOf(eq[0])
+		tb := eeTypeOf(eq[1])
+		if ta.typeCheck(eq, tb) != boolType {
+			return false
+		}
+		ee.stack.push(eq[1], tb)
+		ee.stack.push(eq[0], ta)
+		if !ta.eq(ee) {
+			return false
+		}
+	}
+	return true
+}
+
+func (eeTupleType) typeCheck(e Expr, t2 eeType) eeType {
+	if _, ok := t2.(eeTupleType); !ok {
+		return nil
+	}
+	switch e.(type) {
+	case Eq, Ne:
+		return boolType
 	}
 	return nil
 }

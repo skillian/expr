@@ -449,16 +449,28 @@ type opFunc struct {
 	consts    eeValues
 }
 
+func (f *opFunc) String() string {
+	ops := make([]string, len(f.ops))
+	for i, op := range f.ops {
+		ops[i] = fmt.Sprint(op)
+	}
+	return fmt.Sprintf("(%[1]T)(%[1]p){%s}", f, strings.Join(ops, ", "))
+}
+
 var _ interface {
 	Func
 } = (*opFunc)(nil)
 
-func (f *opFunc) Call(ctx context.Context, vs Values) (interface{}, error) {
-	ee := ctx.Value((*exprEvaluator)(nil).ContextKey()).(*exprEvaluator)
-	if err := ee.evalFunc(ctx, f, vs); err != nil {
-		return nil, err
-	}
-	return ee.stack.popType().pop(&ee.stack), nil
+func (f *opFunc) Call(ctx context.Context, vs Values) (res interface{}, err error) {
+	err = WithEvalContext(ctx, &res, func(ctx context.Context, pres *any) error {
+		ee := ctxutil.Value(ctx, (*exprEvaluator)(nil).ContextKey()).(*exprEvaluator)
+		if err := ee.evalFunc(ctx, f, vs); err != nil {
+			return err
+		}
+		*pres = ee.stack.popType().pop(&ee.stack)
+		return nil
+	})
+	return
 }
 
 //go:generate stringer -type opCode -trimprefix op
@@ -685,11 +697,12 @@ type funcCache struct {
 
 // WithFuncCache creates a context with a function cache in it.
 func WithFuncCache(ctx context.Context) context.Context {
-	return ctxutil.AddToContext(ctx, newFuncCache(ctx))
+	fc := newFuncCache(ctx)
+	return ctxutil.WithValue(ctx, fc.ContextKey(), fc)
 }
 
 func newFuncCache(ctx context.Context) *funcCache {
-	fc2, _ := ctxutil.FromContextKey(ctx, (*funcCache)(nil)).(*funcCache)
+	fc2, _ := ctxutil.Value(ctx, (*funcCache)(nil).ContextKey()).(*funcCache)
 	return &funcCache{parent: fc2}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"reflect"
 	"strings"
 
 	"github.com/skillian/ctxutil"
@@ -13,6 +14,9 @@ import (
 
 // Expr is a basic expression
 type Expr interface{}
+
+// Tuple is a finite ordered sequence of expressions.
+type Tuple []Expr
 
 // Unary is a unary (single-operand) expression, for example the negation
 // operator.
@@ -181,8 +185,6 @@ type Var interface {
 
 // Values is an ordered mapping of Vars to their values.
 type Values interface {
-	ctxutil.Keyer
-
 	// Get the value associated with the given variable.
 	Get(ctx context.Context, v Var) (interface{}, error)
 
@@ -192,6 +194,24 @@ type Values interface {
 	// Vars returns an iterator through the values' variables.  The
 	// returned iterator might be a VarValueIter.
 	Vars() VarIter
+}
+
+func ValuesFromContextOK(ctx context.Context) (vs Values, ok bool) {
+	vs, ok = ctxutil.Value(ctx, ValuesContextKey()).(Values)
+	return
+}
+
+// ValuesFromContext attempts to retrieve expression variable values
+// from a context and returns an error if the values are not found.
+func ValuesFromContext(ctx context.Context) (vs Values, err error) {
+	vs, ok := ValuesFromContextOK(ctx)
+	if !ok {
+		return nil, fmt.Errorf(
+			"%w: failed to get values from context",
+			ErrNotFound,
+		)
+	}
+	return
 }
 
 // ValuesContextKey is the key value to context.Context.Value to retrieve
@@ -234,7 +254,7 @@ type VarValue struct {
 
 // NewValues creates Values from a sequence of Vars and their values.
 func NewValues(ps ...VarValue) Values {
-	capacity := 1 << bits.Len(uint(len(ps)))
+	_, capacity := minMax(1<<bits.Len(uint(len(ps))), 4)
 	vs := &valueList{
 		keys: make([]Var, len(ps), capacity),
 		vals: make([]interface{}, len(ps), capacity),
@@ -249,8 +269,6 @@ func NewValues(ps ...VarValue) Values {
 // ErrNotFound indicates something wasn't found; it should be wrapped
 // in another error that provides more context.
 var ErrNotFound = errors.New("not found")
-
-func (vs *valueList) ContextKey() interface{} { return ValuesContextKey() }
 
 func (vs *valueList) Get(ctx context.Context, v Var) (interface{}, error) {
 	for i, k := range vs.keys {
@@ -350,7 +368,11 @@ func EachVarValue(ctx context.Context, vs Values, f func(Var, interface{}) error
 // vs.
 func MakeVarValueSlice(ctx context.Context, vs Values) ([]VarValue, error) {
 	const arbitraryCapacity = 8
-	vvs := make([]VarValue, arbitraryCapacity)
+	length := arbitraryCapacity
+	if vsLen, ok := tryLenOK(vs); ok {
+		length = vsLen
+	}
+	vvs := make([]VarValue, length)
 	err := EachVarValue(ctx, vs, func(v Var, i interface{}) error {
 		vvs = append(vvs, VarValue{v, i})
 		return nil
@@ -364,6 +386,85 @@ func MakeVarValueSlice(ctx context.Context, vs Values) ([]VarValue, error) {
 	}
 	return vvs, nil
 }
+
+// tryLenOK and tryLenErr attempt to get the length of _something_.
+// tryLenOK doesn't waste resources building an error if the value
+// doesn't have a concept of length.  tryLenErr will report an error
+// message if the value doesn't have a length.
+var tryLenOK, _ = func() (func(v interface{}) (int, bool), func(v interface{}) (int, error)) {
+	type tryLenErr int
+	const (
+		ok tryLenErr = iota
+		lenErr
+		nilPtr
+		badType
+		tooDeep
+	)
+	var tryLenImpl func(v interface{}, depth int) (int, tryLenErr, error)
+	tryLenImpl = func(v interface{}, depth int) (int, tryLenErr, error) {
+		switch v := v.(type) {
+		case interface{ Len() int }:
+			return v.Len(), ok, nil
+		case interface{ Len() (int, error) }:
+			n, err := v.Len()
+			return n, lenErr, err
+		default:
+			rv := reflect.ValueOf(v)
+			if !rv.IsValid() {
+				return 0, nilPtr, nil
+			}
+			switch rv.Kind() {
+			case reflect.Ptr:
+				if depth > 0 {
+					return 0, tooDeep, nil
+				}
+				if rv.IsNil() {
+					return 0, nilPtr, nil
+				}
+				rv = rv.Elem()
+				if !rv.CanInterface() {
+					return 0, badType, nil
+				}
+				return tryLenImpl(rv.Interface(), depth+1)
+			case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+				return rv.Len(), ok, nil
+			}
+			return 0, badType, nil
+		}
+	}
+	return func(v interface{}) (int, bool) {
+			length, tryErr, _ := tryLenImpl(v, 0)
+			if tryErr != ok {
+				return 0, false
+			}
+			return length, true
+		}, func(v interface{}) (int, error) {
+			length, tryErr, err := tryLenImpl(v, 0)
+			if err != nil {
+				return 0, err
+			}
+			switch tryErr {
+			case ok:
+				return length, nil
+			case lenErr:
+				return 0, err
+			case nilPtr:
+				return 0, fmt.Errorf(
+					"%w: cannot get length of nil pointer",
+					errInvalidOp,
+				)
+			case badType:
+				return 0, fmt.Errorf("%w: %T", ErrInvalidType, v)
+			case tooDeep:
+				return 0, fmt.Errorf(
+					"%w: cannot get length of pointer to "+
+						"pointer: %[2]v (type: %[2]T)",
+					ErrInvalidType, v,
+				)
+			}
+			panic(fmt.Errorf("unhandled switch case: %v", tryErr))
+		}
+}()
 
 // VarValueIterOf creates a VarValueIter from the values.  If the Values'
 // Vars function already returns a VarValueIter implementation, that

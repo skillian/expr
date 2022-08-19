@@ -26,6 +26,13 @@ func minMaxBy[TValue any, TKey numberLike](aVal TValue, aKey TKey, bVal TValue, 
 	return aVal, aKey, bVal, bKey
 }
 
+func minMax[T numberLike](a, b T) (min, max T) {
+	if a > b {
+		return b, a
+	}
+	return a, b
+}
+
 func getIndexOrAppendInto[T any](vs *[]T, v T) int {
 	for i, x := range *vs {
 		if eq(v, x) {
@@ -46,4 +53,23 @@ func eq(a, b interface{}) (Eq bool) {
 		}
 	}()
 	return a == b
+}
+
+type Tuple2[T0, T1 any] struct {
+	V0 T0
+	V1 T1
+}
+
+func Tuple2Of[T0, T1 any](v0 T0, v1 T1) Tuple2[T0, T1] {
+	return Tuple2[T0, T1]{V0: v0, V1: v1}
+}
+
+type Tuple3[T0, T1, T2 any] struct {
+	V0 T0
+	V1 T1
+	V2 T2
+}
+
+func Tuple3Of[T0, T1, T2 any](v0 T0, v1 T1, v2 T2) Tuple3[T0, T1, T2] {
+	return Tuple3[T0, T1, T2]{V0: v0, V1: v1, V2: v2}
 }
