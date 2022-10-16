@@ -3,14 +3,13 @@ package expr
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/errutil"
@@ -117,8 +116,10 @@ func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) (
 		v, walkErr := vs.Get(ctx, va)
 		if walkErr != nil {
 			err = fmt.Errorf(
-				"error while compiling function from %v: %w",
-				e, walkErr,
+				"error getting var %[1]v (type: "+
+					"%[1]T) from values %[2]v "+
+					"(type: %[2]T): %[3]w",
+				va, vs, walkErr,
 			)
 			return false
 		}
@@ -161,8 +162,11 @@ func (b *exprFuncBuilder) walk(e Expr) bool {
 	sec := b.peekFrame(1)
 	sec.opers = append(sec.opers, top)
 	op := b.genOp()
-	if op == opNop {
+	switch op {
+	case opNop:
 		return b.walkVarOrValue(top, e)
+	case opPackSlice:
+		return b.walkTuple(top, e)
 	}
 	t, err := b.checkType(op, top)
 	if errors.Is(err, ErrInvalidType) {
@@ -223,6 +227,33 @@ func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) bool {
 	return true
 }
 
+var (
+	reflectEmptyInterfaceType             = reflect.TypeOf((*interface{})(nil)).Elem()
+	emptyEmptyInterfaceSlice  interface{} = ([]interface{})(nil)
+)
+
+func (b *exprFuncBuilder) walkTuple(fr *efbStackFrame, e Expr) bool {
+	// if all elements are the same eeType, create a slice of that.
+	// else, []interface{}
+	if len(fr.opers) == 0 {
+		return b.walkVarOrValue(fr, emptyEmptyInterfaceSlice)
+	}
+	et := fr.opers[0].t
+	for _, oper := range fr.opers[1:] {
+		if et != oper.t {
+			et = eeTypeFromReflectType(reflectEmptyInterfaceType)
+			break
+		}
+	}
+	i := b.getTypeIndex(et)
+	fr.codes = append(fr.codes, opPackSlice)
+	appendIntToOpCodesInto(&fr.codes, int64(i))
+	appendIntToOpCodesInto(&fr.codes, int64(len(fr.opers)))
+	fr.t = tupleType
+	_ = b.popFrame()
+	return true
+}
+
 // varOrValueType gets a variable or value's type.  If e is a variable,
 // the type of the variable's value is returned.
 func (b *exprFuncBuilder) varOrValueType(e Expr) (isVar bool, t eeType) {
@@ -263,7 +294,10 @@ func (b *exprFuncBuilder) tryPromoteNumTypes(fr *efbStackFrame, leftNt, rightNt 
 				return i
 			}
 		}
-		return -1
+		panic(fmt.Errorf(
+			"unknown number type for numeric "+
+				"promotion: %[1]v (type: %[1]T)", nt,
+		))
 	}
 	leftNti := numTypeIndex(leftNt)
 	rightNti := numTypeIndex(rightNt)
@@ -325,10 +359,22 @@ func (b *exprFuncBuilder) genOp() opCode {
 			return opLdma
 		}
 		return opLdm
+	case Tuple:
+		return opPackSlice
 	default:
 		// will turn into some sort of load value
 		return opNop
 	}
+}
+
+func (b *exprFuncBuilder) getTypeIndex(t eeType) int {
+	for i, t2 := range b.values.types {
+		if t == t2 {
+			return i
+		}
+	}
+	b.values.types = append(b.values.types, t)
+	return len(b.values.types) - 1
 }
 
 // peekFrame peeks at the i'th frame from the top of the stack (0 for
@@ -471,223 +517,6 @@ func (f *opFunc) Call(ctx context.Context, vs Values) (res interface{}, err erro
 		return nil
 	})
 	return
-}
-
-//go:generate stringer -type opCode -trimprefix op
-type opCode byte
-
-func appendIntToOpCodesInto(ops *[]opCode, i int64) {
-	*ops = appendIntToOpCodes(*ops, i)
-}
-
-func appendIntToOpCodes(ops []opCode, i int64) []opCode {
-	var bs [9]byte
-	n := binary.PutUvarint(bs[:], uint64(i))
-	return append(ops, asOpCodeSlice(bs[:n])...)
-}
-
-func getIntFromOpCodes(ops []opCode) (int64, int) {
-	_, n, _, _ := minMaxBy("", len(ops), "", 9)
-	u, n := binary.Uvarint(asByteSlice(ops[:n]))
-	return int64(u), n
-}
-
-func asByteSlice[T ~byte](sl []T) []byte {
-	return *((*[]byte)(unsafe.Pointer(&sl)))
-}
-
-func asOpCodeSlice[T ~byte](sl []T) []opCode {
-	return *((*[]opCode)(unsafe.Pointer(&sl)))
-}
-
-func mustBeByte[T ~byte](v T) {}
-
-func _() {
-	mustBeByte(opCode(0))
-}
-
-const (
-	// opNop does nothing
-	opNop opCode = iota
-
-	// opNot negates its operand
-	//
-	//	x := pop()
-	//	push(!x)
-	//
-	opNot
-
-	// opAnd performs a boolean AND operation of its operands
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a && b)
-	//
-	opAnd
-
-	// opOr performs a boolean OR operation of its operands
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a || b)
-	//
-	opOr
-
-	// opEq compares its operands for equality
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a == b)
-	//
-	opEq
-
-	// opNe compares its operands for inequality
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a != b)
-	//
-	opNe
-
-	// opGt checks if the top operand is greater than the second.
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a > b)
-	//
-	opGt
-
-	// opGe checks if the top operand is greater than or equal to
-	// the second.
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a >= b)
-	//
-	opGe
-
-	// opLt checks if the top operand is less than the second.
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a < b)
-	//
-	opLt
-
-	// opLe checks if the top operand is less than or equal to
-	// the second.
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a <= b)
-	//
-	opLe
-
-	// opAdd adds the top two operands together.
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a + b)
-	//
-	opAdd
-
-	// opSub subtracts the second operand from the top operand
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a - b)
-	//
-	opSub
-
-	// opMul multipies the top two operands
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a * b)
-	//
-	opMul
-
-	// opDiv divides the top operand by the second.
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a / b)
-	//
-	opDiv
-
-	// opConv1 is followed by a single variadic int which is an
-	// index into the function's const types that the top operand
-	// should be converted to.  That type needs to know how to
-	// convert from the source type.
-	//
-	//	op, index := _decode_op_and_index()
-	//	v := pop()
-	//	t1 := func.types[index]
-	//	t1.conv(v, t1)
-	//
-	opConv1
-
-	// opConv2 works the same as opConv1 except there's a second
-	// index to a type that actually performs the conversion.
-	//
-	//	op, index1, index2 := _decode_op_and_index()
-	//	v := pop()
-	//	t1 := func.types[index]
-	//	t2 := func.values[index].(eeConvType)
-	//	t2.conv(v, t1)
-	//
-	opConv2
-
-	// opSwap2 swaps the top two operands on the stack
-	opSwap2
-
-	// opDup duplicates the top operand on the stack.
-	opDup
-
-	// opLdc loads a constant from the function's constants.  It is
-	// followed by a variadic int in the actual byte code which
-	// indexes into a func's constkeys which is then used to
-	// retrieve a value from the consts.
-	opLdc
-
-	// opLdv loads a variable value.  It works the same as opLdc,
-	// but expects its constant value to be a Var whose value is
-	// then loaded onto the stack.
-	opLdv
-
-	// opLdm loads a member value onto the stack.
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(a.b)
-	//
-	opLdm
-
-	// opLdm loads a member address onto the stack.
-	//
-	//	a := pop()
-	//	b := pop()
-	//	push(&a.b)
-	//
-	opLdma
-
-	// opLdk loads a value from a map associated with a key
-	//
-	//	m := pop()
-	//	k := pop()
-	//	push(m[k])
-	//
-	opLdk
-)
-
-func (op opCode) arity() int {
-	switch op {
-	case opNop:
-		return 0
-	case opNot:
-		return 1
-	}
-	return 2
 }
 
 type funcCache struct {

@@ -22,8 +22,10 @@ var evalTests = []evalTest{
 	{expr.Eq{1, 1}, nil, true, ""},
 	{expr.Eq{big.NewRat(1, 1), big.NewRat(2, 1)}, nil, false, ""},
 	{expr.Eq{false, false}, nil, true, ""},
-	// // {expr.Eq{struct{}{}, struct{}{}}, true, ""},
+	{expr.Eq{0.125, 0.125}, nil, true, ""},
+	{expr.Eq{struct{}{}, struct{}{}}, nil, true, ""},
 	{expr.Ne{1, 1}, nil, false, ""},
+	{expr.Ne{0.125, 0.25}, nil, true, ""},
 	{expr.Eq{"hello", "world"}, nil, false, ""},
 	{expr.Eq{"hello", "hello"}, nil, true, ""},
 	{expr.Ne{"hello", "world"}, nil, true, ""},
@@ -47,15 +49,19 @@ var evalTests = []evalTest{
 	{expr.Or{true, true}, nil, true, ""},
 	{expr.Add{1, 1}, nil, 2, ""},
 	{expr.Add{1, -1}, nil, 0, ""},
+	{expr.Add{0.625, 1.5}, nil, 2.125, ""},
 	{expr.Sub{1, 1}, nil, 0, ""},
 	{expr.Sub{1, -1}, nil, 2, ""},
+	{expr.Sub{1.5, 0.625}, nil, 0.875, ""},
 	{expr.Mul{1, 1}, nil, 1, ""},
 	{expr.Mul{1, -1}, nil, -1, ""},
 	{expr.Mul{10, 10}, nil, 100, ""},
+	{expr.Mul{1.5, 0.625}, nil, 0.9375, ""},
 	{expr.Div{2, 1}, nil, 2, ""},
 	{expr.Div{2, 2}, nil, 1, ""},
 	{expr.Div{4, 2}, nil, 2, ""},
 	{expr.Div{22, 7}, nil, 3, ""},
+	{expr.Div{1.5, 0.625}, nil, 2.4, ""},
 
 	// multi-step
 	{expr.Add{expr.Mul{3, 2}, 1}, nil, 7, ""},
@@ -89,8 +95,11 @@ var evalTests = []evalTest{
 		}
 	}(),
 
+	// Tuples
+	{expr.Eq{expr.Tuple{1, 2}, expr.Tuple{1, 2}}, nil, true, ""},
+
 	// negative tests:
-	{expr.Not{2}, nil, false, "invalid type"},
+	// {expr.Not{2}, nil, false, "invalid type"},
 }
 
 func TestEval(t *testing.T) {

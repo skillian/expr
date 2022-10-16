@@ -8,6 +8,8 @@ import (
 	"math/bits"
 	"reflect"
 	"strings"
+	"sync"
+	"unsafe"
 
 	"github.com/skillian/ctxutil"
 )
@@ -17,6 +19,8 @@ type Expr interface{}
 
 // Tuple is a finite ordered sequence of expressions.
 type Tuple []Expr
+
+func (t Tuple) Operands() []Expr { return ([]Expr)(t) }
 
 // Unary is a unary (single-operand) expression, for example the negation
 // operator.
@@ -168,6 +172,39 @@ func (x Div) appendString(sb *strings.Builder) { appendBinary(sb, "/", x) }
 // Mem selects a member of a source expression.
 type Mem [2]Expr
 
+var mems sync.Map // map[reflect.Type][]uintptr
+
+// MemOf creates a member expression that accesses a direct field of
+//
+func MemOf[S, M any](va Var, f func(*S) *M) Mem {
+	rt := reflect.TypeOf((*S)(nil)).Elem()
+	if rt.Kind() != reflect.Struct {
+		panic("can only get members of structs")
+	}
+	var key interface{} = rt
+	var offsets []uintptr
+	v, loaded := mems.Load(key)
+	if loaded {
+		offsets = v.([]uintptr)
+	} else {
+		offsets = make([]uintptr, rt.NumField())
+		for i := 0; i < len(offsets); i++ {
+			offsets[i] = rt.Field(i).Offset
+		}
+		_, _ = mems.LoadOrStore(key, offsets)
+	}
+	offset := uintptr(unsafe.Pointer(f((*S)(unsafe.Pointer(&va))))) - uintptr(unsafe.Pointer(&va))
+	for i, off := range offsets {
+		if off == offset {
+			return Mem{va, i}
+		}
+	}
+	panic(fmt.Errorf(
+		"failed to get member of type %v from %v",
+		reflect.TypeOf((*M)(nil)).Elem(), rt,
+	))
+}
+
 func (x Mem) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Mem) String() string { return buildString(x) }
@@ -201,15 +238,17 @@ func ValuesFromContextOK(ctx context.Context) (vs Values, ok bool) {
 	return
 }
 
+var errNoValuesInContext = fmt.Errorf(
+	"%w: failed to get values from context",
+	ErrNotFound,
+)
+
 // ValuesFromContext attempts to retrieve expression variable values
 // from a context and returns an error if the values are not found.
 func ValuesFromContext(ctx context.Context) (vs Values, err error) {
 	vs, ok := ValuesFromContextOK(ctx)
 	if !ok {
-		return nil, fmt.Errorf(
-			"%w: failed to get values from context",
-			ErrNotFound,
-		)
+		return nil, errNoValuesInContext
 	}
 	return
 }
@@ -509,6 +548,19 @@ func appendBinary(sb *strings.Builder, op string, b Binary) {
 	sb.WriteByte(' ')
 	appendString(sb, ops[1])
 	sb.WriteByte(')')
+}
+
+// HasOperands returns true if the expression has operands
+func HasOperands(e Expr) bool {
+	switch e.(type) {
+	case Unary:
+		return true
+	case Binary:
+		return true
+	case interface{ Operands() []Expr }:
+		return true
+	}
+	return false
 }
 
 // Operands gets the operands of the given expression as a slice.

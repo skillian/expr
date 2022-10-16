@@ -36,6 +36,9 @@ func Eval(ctx context.Context, e Expr, vs Values) (interface{}, error) {
 	return fn.Call(ctx, vs)
 }
 
+// FuncOf creates a function from an expression and set of parameter values.
+// This is a "micro-optimization" of Eval for, e.g., loops where the types of
+// the values *definitely* don't change per
 func FuncOf(ctx context.Context, e Expr, vs Values) (Func, error) {
 	fc, ok := ctxutil.Value(ctx, (*funcCache)(nil)).(*funcCache)
 	var fk funcKey
@@ -99,7 +102,8 @@ func (ee *exprEvaluator) ContextKey() interface{} { return (*exprEvaluator)(nil)
 var errInvalidOp = errors.New("invalid op code")
 
 func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (err error) {
-	defer func(p *error) {
+	var pc int
+	defer func(p *error, f *opFunc, pc *int) {
 		v := recover()
 		if v == nil {
 			return
@@ -108,9 +112,15 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (er
 		if !ok {
 			err = fmt.Errorf("%v", v)
 		}
+		sb := strings.Builder{}
+		opDasmAppendTo(&sb, f, "")
+		err = fmt.Errorf(
+			"error in %v, pc: %d:\n%s\nerror: %w",
+			f, *pc, sb.String(), err,
+		)
 		*p = multierrorOf(*p, err)
-	}(&err)
-	for pc := 0; pc < len(f.ops); pc++ {
+	}(&err, f, &pc)
+	for ; pc < len(f.ops); pc++ {
 		op := f.ops[pc]
 		var et eeType
 		if len(ee.stack.types) > 0 {
@@ -211,6 +221,21 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (er
 			et.(eeMemType).mem(ee).ref(ee)
 		case opLdk:
 			et.(eeMapType).key(ee)
+		case opPackSlice:
+			pc++
+			typeIndex, n := getIntFromOpCodes(f.ops[pc:])
+			et = f.consts.types[typeIndex]
+			pc += n
+			length, n := getIntFromOpCodes(f.ops[pc:])
+			pc += n - 1 // loop will increment
+			n = int(length)
+			st := reflect.SliceOf(et.reflectType())
+			sl := reflect.MakeSlice(st, n, n)
+			for i := 0; i < n; i++ {
+				v, _ := ee.stack.pop()
+				sl.Index(i).Set(reflect.ValueOf(v))
+			}
+			ee.stack.push(sl.Interface(), nil)
 		default:
 			panic(fmt.Errorf("%w: %v", errInvalidOp, op))
 		}
@@ -516,6 +541,8 @@ type eeType interface {
 	// given operation is compatible with the other operand.
 	// Incompatible operations should return a nil eeType.
 	typeCheck(e Expr, t2 eeType) eeType
+
+	reflectType() reflect.Type
 }
 
 var (
@@ -545,7 +572,10 @@ var (
 	} = &numType{timeDurationTypeImpl{}}
 	tupleType interface {
 		eeType
-	} = eeTupleType{}
+	} = &eeTupleType{
+		eeAnyType{},
+		reflect.TypeOf((*Tuple)(nil)).Elem(),
+	}
 	float64Type interface {
 		eeType
 		eeNumType
@@ -563,15 +593,18 @@ var (
 	}
 
 	eeTypes = func() (m sync.Map) { // reflect.Type -> eeType
-		m.Store(reflect.TypeOf(false), boolType)
-		m.Store(reflect.TypeOf(int(0)), intType)
-		m.Store(reflect.TypeOf(int64(0)), int64Type)
-		m.Store(reflect.TypeOf(float64(0)), float64Type)
-		m.Store(reflect.TypeOf(string("")), stringType)
-		m.Store(reflect.TypeOf(time.Time{}), timeType)
-		m.Store(reflect.TypeOf(time.Duration(0)), timeDurationType)
-		m.Store(reflect.TypeOf(Tuple(nil)), tupleType)
-		m.Store(reflect.TypeOf((*big.Rat)(nil)), mathBigRatType)
+		m.Store(reflect.TypeOf((*bool)(nil)).Elem(), boolType)
+		m.Store(reflect.TypeOf((*int)(nil)).Elem(), intType)
+		m.Store(reflect.TypeOf((*int64)(nil)).Elem(), int64Type)
+		m.Store(reflect.TypeOf((*float64)(nil)).Elem(), float64Type)
+		m.Store(reflect.TypeOf((*string)(nil)).Elem(), stringType)
+		m.Store(reflect.TypeOf((*time.Time)(nil)).Elem(), timeType)
+		m.Store(reflect.TypeOf((*time.Duration)(nil)).Elem(), timeDurationType)
+		m.Store(reflect.TypeOf((*Tuple)(nil)).Elem(), tupleType)
+		m.Store(reflect.TypeOf((*big.Rat)(nil)) /*.Elem()*/, mathBigRatType)
+		m.Store(reflectSliceOfAnyType, &eeTupleType{
+			eeAnyType{}, reflectSliceOfAnyType,
+		})
 		return
 	}()
 )
@@ -600,6 +633,8 @@ func eeTypeFromReflectType(rt reflect.Type) eeType {
 					rt.Elem(),
 				)
 			}
+		case reflect.Slice:
+			return &eeTupleType{eeAnyType{}, rt}, nil
 		case reflect.Ptr:
 			rt = rt.Elem()
 			if rt.Kind() != reflect.Struct {
@@ -670,7 +705,7 @@ func eeTypeFromReflectType(rt reflect.Type) eeType {
 			}
 			ert.mems = make([]eeMem, len(mems))
 			copy(ert.mems, mems)
-			return ert, func(et eeType, rt reflect.Type) {}
+			return ert, nil
 		}
 		panic(fmt.Errorf(
 			"creating expression evaluator type "+
@@ -689,7 +724,9 @@ func eeTypeFromReflectType(rt reflect.Type) eeType {
 	if loaded {
 		return v.(eeType)
 	}
-	init(et, rt)
+	if init != nil {
+		init(et, rt)
+	}
 	return et
 }
 
@@ -778,6 +815,10 @@ func (eeBoolType) pop2Bool(es *eeStack) (a, b bool) {
 	return *an.bool(), *bn.bool()
 }
 
+var reflectBoolType = reflect.TypeOf(false)
+
+func (eeBoolType) reflectType() reflect.Type { return reflectBoolType }
+
 type numType struct {
 	impl numTypeImpl
 }
@@ -793,6 +834,8 @@ type numTypeImpl interface {
 
 	valToNum(interface{}) eeNum
 	numToVal(eeNum) interface{}
+
+	reflectType() reflect.Type
 }
 
 var _ interface {
@@ -814,14 +857,19 @@ func (t *numType) copy(dest *eeValues, j int, src *eeValues, i int) { dest.nums[
 func (t *numType) set(vs *eeValues, i int, v interface{})           { vs.nums[i] = t.impl.valToNum(v) }
 func (t *numType) sub(ee *exprEvaluator)                            { ee.stack.pushNum(t.impl.sub(t.pop2Num(&ee.stack, false))) }
 
+func (t *numType) reflectType() reflect.Type { return t.impl.reflectType() }
+
 func (t *numType) typeCheck(e Expr, t2 eeType) eeType {
+	if t != t2 {
+		return nil
+	}
 	// by default, only support comparisson and arithmetic,
 	// and return the same type.
 	switch e.(type) {
-	case Eq, Ne, Gt, Ge, Lt, Le, Add, Sub, Mul, Div:
-		if t == t2 {
-			return t2
-		}
+	case Eq, Ne, Gt, Ge, Lt, Le:
+		return boolType
+	case Add, Sub, Mul, Div:
+		return t2
 	}
 	return nil
 }
@@ -852,6 +900,10 @@ func (intTypeImpl) div(a, b eeNum) eeNum { return eeNumInt(*a.int() / *b.int()) 
 func (intTypeImpl) numToVal(n eeNum) interface{}     { return *n.int() }
 func (intTypeImpl) valToNum(v interface{}) (n eeNum) { *n.int() = v.(int); return }
 
+var reflectIntType = reflect.TypeOf((*int)(nil)).Elem()
+
+func (intTypeImpl) reflectType() reflect.Type { return reflectIntType }
+
 type int64TypeImpl struct{}
 
 var _ interface {
@@ -877,6 +929,10 @@ func (int64TypeImpl) div(a, b eeNum) eeNum { return eeNumInt64(*a.int64() / *b.i
 
 func (int64TypeImpl) numToVal(n eeNum) interface{}     { return *n.int64() }
 func (int64TypeImpl) valToNum(v interface{}) (n eeNum) { *n.int64() = v.(int64); return }
+
+var reflectInt64Type = reflect.TypeOf((*int64)(nil)).Elem()
+
+func (int64TypeImpl) reflectType() reflect.Type { return reflectInt64Type }
 
 type eeFloat64Type struct{ numType }
 
@@ -914,6 +970,10 @@ func (float64TypeImpl) div(a, b eeNum) eeNum { return eeNumFloat64(*a.float64() 
 
 func (float64TypeImpl) numToVal(n eeNum) interface{}     { return *n.float64() }
 func (float64TypeImpl) valToNum(v interface{}) (n eeNum) { *n.float64() = v.(float64); return }
+
+var reflectFloat64Type = reflect.TypeOf((*float64)(nil)).Elem()
+
+func (float64TypeImpl) reflectType() reflect.Type { return reflectFloat64Type }
 
 type eeNumConvType struct{}
 
@@ -1129,21 +1189,31 @@ func (eeTimeType) typeCheck(e Expr, t2 eeType) eeType {
 	return nil
 }
 
-type eeTupleType struct{ eeAnyType }
+var reflectTimeType = reflect.TypeOf((*time.Time)(nil)).Elem()
+
+func (eeTimeType) reflectType() reflect.Type { return reflectTimeType }
+
+type eeTupleType struct {
+	eeAnyType
+	rtype reflect.Type
+}
 
 var _ interface {
 	eeType
-} = eeTupleType{}
+} = (*eeTupleType)(nil)
 
-func (eeTupleType) eq(ee *exprEvaluator) bool {
+func (t *eeTupleType) eq(ee *exprEvaluator) bool {
 	_, _ = ee.stack.popType(), ee.stack.popType()
-	tupA := ee.stack.popAny().(Tuple)
-	tupB := ee.stack.popAny().(Tuple)
-	if len(tupA) != len(tupB) {
+	tupA := reflect.ValueOf(ee.stack.popAny())
+	tupB := reflect.ValueOf(ee.stack.popAny())
+	length := tupA.Len()
+	if length != tupB.Len() {
 		return false
 	}
 	eq := Eq{}
-	for i, va := range tupA {
+	for i := 0; i < length; i++ {
+		eq[0] = tupA.Index(i).Interface()
+		eq[1] = tupB.Index(i).Interface()
 		// TODO: A better idea will probably be to "unpack"
 		// tuple equality checks when compiling expressions into
 		// something like:
@@ -1156,7 +1226,6 @@ func (eeTupleType) eq(ee *exprEvaluator) bool {
 		//		Eq{a[2], b[2]},
 		//	}
 		//
-		eq[0], eq[1] = va, tupB[i]
 		ta := eeTypeOf(eq[0])
 		tb := eeTypeOf(eq[1])
 		if ta.typeCheck(eq, tb) != boolType {
@@ -1171,8 +1240,16 @@ func (eeTupleType) eq(ee *exprEvaluator) bool {
 	return true
 }
 
-func (eeTupleType) typeCheck(e Expr, t2 eeType) eeType {
-	if _, ok := t2.(eeTupleType); !ok {
+var reflectSliceOfAnyType = reflect.TypeOf((*[]interface{})(nil)).Elem()
+
+func (t *eeTupleType) reflectType() reflect.Type { return t.rtype }
+
+func (t *eeTupleType) typeCheck(e Expr, t2 eeType) eeType {
+	tt2, ok := t2.(*eeTupleType)
+	if !ok {
+		return nil
+	}
+	if tt2 != t {
 		return nil
 	}
 	switch e.(type) {
@@ -1243,6 +1320,10 @@ func (eeMathBigRatType) sub(ee *exprEvaluator) {
 	ee.putMathBigRat(b)
 }
 
+var reflectMathBigRatType = reflect.TypeOf((*big.Rat)(nil))
+
+func (eeMathBigRatType) reflectType() reflect.Type { return reflectMathBigRatType }
+
 func (eeMathBigRatType) typeCheck(e Expr, t2 eeType) eeType {
 	if t2 != mathBigRatType {
 		return nil
@@ -1291,6 +1372,11 @@ func (eeStringType) peek(es *eeStack) interface{}                     { return e
 func (eeStringType) pop(es *eeStack) interface{}                      { return es.popStr() }
 func (eeStringType) copy(dest *eeValues, j int, src *eeValues, i int) { dest.strs[j] = src.strs[i] }
 func (eeStringType) set(vs *eeValues, i int, v interface{})           { vs.strs[i] = v.(string) }
+
+var reflectStringType = reflect.TypeOf((*string)(nil)).Elem()
+
+func (eeStringType) reflectType() reflect.Type { return reflectStringType }
+
 func (eeStringType) typeCheck(e Expr, t2 eeType) eeType {
 	switch e.(type) {
 	case Eq, Ne, Gt, Ge, Lt, Le:
@@ -1324,6 +1410,8 @@ var _ interface {
 func (t eeVarType) typeCheck(e Expr, t2 eeType) eeType {
 	return t.valueType.typeCheck(e, t2)
 }
+
+func (t eeVarType) reflectType() reflect.Type { return t.valueType.reflectType() }
 
 type eeMem interface {
 	memType() eeType
@@ -1364,6 +1452,8 @@ func (rt *eeReflectType) typeCheck(e Expr, t2 eeType) eeType {
 	}
 	return nil
 }
+
+func (rt *eeReflectType) reflectType() reflect.Type { return rt.rtype }
 
 type eeStructField struct {
 	et eeType
@@ -1443,6 +1533,7 @@ func (m *eeReflectMethodMem) memType() eeType { return m.valueType }
 
 type eeReflectMapType struct {
 	eeAnyType
+	mapRType  reflect.Type
 	valueType eeType
 }
 
@@ -1467,6 +1558,8 @@ func (t *eeReflectMapType) setKey(ee *exprEvaluator) {
 		reflect.ValueOf(v),
 	)
 }
+
+func (t *eeReflectMapType) reflectType() reflect.Type { return t.mapRType }
 
 func (t *eeReflectMapType) typeCheck(e Expr, t2 eeType) eeType {
 	switch e.(type) {
