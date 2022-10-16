@@ -14,7 +14,11 @@ var _ interface {
 } = multierror{}
 
 func multierrorOf(errs ...error) error {
-	me := make(multierror, 1<<bits.Len(uint(len(errs))))
+	capacityGuess := 1 << bits.Len(uint(len(errs)))
+	if capacityGuess < 2 {
+		capacityGuess = 2
+	}
+	me := make(multierror, 0, capacityGuess)
 	for _, err := range errs {
 		if err == nil {
 			continue
@@ -25,8 +29,11 @@ func multierrorOf(errs ...error) error {
 		}
 		me = append(me, err)
 	}
-	if len(me) == 0 {
+	switch len(me) {
+	case 0:
 		return nil
+	case 1:
+		return me[0]
 	}
 	return me
 }
