@@ -2,9 +2,6 @@ package expr
 
 import (
 	"encoding/binary"
-	"fmt"
-	"strconv"
-	"strings"
 	"unsafe"
 )
 
@@ -44,28 +41,28 @@ func _() {
 }
 
 const (
-	// opNop does nothing
+	// opNop does nothing.
 	opNop opCode = iota
 
 	// opNot negates its operand
 	//
-	//	x := pop()
+	//	x := pop().(bool)
 	//	push(!x)
 	//
 	opNot
 
 	// opAnd performs a boolean AND operation of its operands
 	//
-	//	a := pop()
-	//	b := pop()
+	//	a := pop().(bool)
+	//	b := pop().(bool)
 	//	push(a && b)
 	//
 	opAnd
 
 	// opOr performs a boolean OR operation of its operands
 	//
-	//	a := pop()
-	//	b := pop()
+	//	a := pop().(bool)
+	//	b := pop().(bool)
 	//	push(a || b)
 	//
 	opOr
@@ -241,56 +238,4 @@ func (op opCode) nargs() int {
 		return 2
 	}
 	return 0
-}
-
-func opDasmAppendTo(sb *strings.Builder, f *opFunc, indent string) error {
-	funcOpArgString := func(f *opFunc, op opCode, i int, arg int64) string {
-		switch op {
-		case opLdc:
-			ck := f.constkeys[int(arg)]
-			v := f.consts.types[ck.typeIndex].get(&f.consts, ck.valIndex)
-			return fmt.Sprintf("%[1]v (type: %[1]T)", v)
-		case opPackSlice:
-			if i == 1 {
-				return "" // fine as just numeric value.
-			}
-			fallthrough // else, it's 0: the type param:
-		case opConv1, opConv2:
-			t := f.consts.types[int(arg)]
-			return fmt.Sprintf("%[1]v (metatype: %[1]T)", t)
-		}
-		panic(fmt.Errorf("unexpected op: %v", op))
-	}
-	var indexCache [2]int64
-	for i := 0; i < len(f.ops); i++ {
-		op := f.ops[i]
-		indexes := indexCache[:op.nargs()]
-		for j := range indexes {
-			i64, n := getIntFromOpCodes(f.ops[i+1:])
-			i += n
-			indexes[j] = i64
-		}
-		sb.WriteString(indent)
-		sb.WriteString(strconv.Itoa(i))
-		sb.WriteByte('\t')
-		sb.WriteString(op.String())
-		if len(indexes) > 0 {
-			sb.WriteByte('\t')
-			for j, x := range indexes {
-				if j > 0 {
-					sb.WriteString(", ")
-				}
-				sb.WriteString(strconv.FormatInt(x, 16))
-				sb.WriteString(" (")
-				sb.WriteString(strconv.FormatInt(x, 10))
-				if s := funcOpArgString(f, op, j, x); s != "" {
-					sb.WriteString(": ")
-					sb.WriteString(s)
-				}
-				sb.WriteByte(')')
-			}
-		}
-		sb.WriteByte('\n')
-	}
-	return nil
 }
