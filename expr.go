@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-	"unsafe"
 
 	"github.com/skillian/ctxutil"
 )
@@ -174,34 +173,67 @@ type Mem [2]Expr
 
 var mems sync.Map // map[reflect.Type][]uintptr
 
-// MemOf creates a member expression that accesses a direct field of
-//
-func MemOf[S, M any](va Var, f func(*S) *M) Mem {
-	rt := reflect.TypeOf((*S)(nil)).Elem()
-	if rt.Kind() != reflect.Struct {
-		panic("can only get members of structs")
-	}
-	var key interface{} = rt
-	var offsets []uintptr
-	v, loaded := mems.Load(key)
-	if loaded {
-		offsets = v.([]uintptr)
-	} else {
-		offsets = make([]uintptr, rt.NumField())
-		for i := 0; i < len(offsets); i++ {
-			offsets[i] = rt.Field(i).Offset
+func MemOf(e Expr, base, field interface{}) Mem {
+	getPtr := func(v interface{}) (rv reflect.Value, p uintptr) {
+		rv = reflect.ValueOf(v)
+		if !rv.IsValid() {
+			panic("MemOf: base is invalid")
 		}
-		_, _ = mems.LoadOrStore(key, offsets)
+		if rv.Kind() != reflect.Ptr {
+			panic(fmt.Sprintf(
+				"MemOf: base must be pointer to struct, not %T",
+				base,
+			))
+		}
+		if rv.IsNil() {
+			panic("MemOf: base is nil")
+		}
+		p = rv.Pointer()
+		return
 	}
-	offset := uintptr(unsafe.Pointer(f((*S)(unsafe.Pointer(&va))))) - uintptr(unsafe.Pointer(&va))
-	for i, off := range offsets {
-		if off == offset {
-			return Mem{va, i}
+	type offsetType struct {
+		offset uintptr
+		rtype  reflect.Type
+	}
+	getOffsets := func(t reflect.Type) *[]offsetType {
+		k := interface{}(t)
+		v, loaded := mems.Load(k)
+		if loaded {
+			return v.(*[]offsetType)
+		}
+		offs := new([]offsetType)
+		*offs = make([]offsetType, 0, t.NumField())
+		for i := 0; i < cap(*offs); i++ {
+			f := t.Field(i)
+			if f.Type.Size() == 0 {
+				continue
+			}
+			*offs = append(*offs, offsetType{
+				offset: f.Offset,
+				rtype:  reflect.PtrTo(f.Type),
+			})
+		}
+		v, loaded = mems.LoadOrStore(k, offs)
+		if loaded {
+			return v.(*[]offsetType)
+		}
+		return offs
+	}
+	bv, bp := getPtr(base)
+	fv, fp := getPtr(field)
+	ft := fv.Type()
+	foff := fp - bp
+	offs := *getOffsets(bv.Type().Elem())
+	// TODO: Maybe binary search would be better, but I'm assuming tiny
+	// numbers of fields for now:
+	for i, ot := range offs {
+		if ot.offset == foff && ot.rtype == ft {
+			return Mem{e, i}
 		}
 	}
 	panic(fmt.Errorf(
-		"failed to get member of type %v from %v",
-		reflect.TypeOf((*M)(nil)).Elem(), rt,
+		"unknown %T field at offset %d in %T",
+		field, foff, base,
 	))
 }
 
@@ -251,6 +283,15 @@ func ValuesFromContext(ctx context.Context) (vs Values, err error) {
 		return nil, errNoValuesInContext
 	}
 	return
+}
+
+func GetOrAddValuesToContext(ctx context.Context) (context.Context, Values) {
+	vs, ok := ValuesFromContextOK(ctx)
+	if !ok {
+		vs = NewValues()
+		ctx = ctxutil.WithValue(ctx, ValuesContextKey(), vs)
+	}
+	return ctx, vs
 }
 
 // ValuesContextKey is the key value to context.Context.Value to retrieve
@@ -578,6 +619,31 @@ func Operands(e Expr) []Expr {
 	return nil
 }
 
+// Rewrite an expression tree by passing each node to f.
+func Rewrite(e Expr, f func(Expr) Expr) Expr {
+	switch e2 := e.(type) {
+	case Unary:
+		op := e2.Operand()
+		op2 := f(op)
+		if !eq(op, op2) {
+			arr := reflect.New(reflect.TypeOf(e)).Elem()
+			arr.Index(0).Set(reflect.ValueOf(op2))
+			e = arr.Interface()
+		}
+	case Binary:
+		ops := e2.Operands()
+		ops2 := [2]Expr{f(ops[0]), f(ops[1])}
+		if !eq(ops[0], ops2[0]) || !eq(ops[1], ops2[1]) {
+			arr := reflect.New(reflect.TypeOf(e)).Elem()
+			arr.Index(0).Set(reflect.ValueOf(ops2[0]))
+			arr.Index(1).Set(reflect.ValueOf(ops2[1]))
+			e = arr.Interface()
+		}
+	default:
+	}
+	return f(e)
+}
+
 // Walk the expression tree, calling f(e) with the expression when
 // "entering" the expression and f(nil) when "exiting" an expression.
 //
@@ -590,6 +656,8 @@ func Operands(e Expr) []Expr {
 //	f(nil)
 //	f(nil)
 //
+// Note that WalkOptions such as WalkOperandsBackwards can change the
+// call behavior.
 func Walk(e Expr, f func(Expr) bool, options ...WalkOption) bool {
 	var cfg walkConfig
 	for _, opt := range options {
@@ -621,8 +689,12 @@ const (
 	walkBackwards walkFlag = 1 << iota
 )
 
+// WalkOption is an option to the Walk function.
 type WalkOption func(c *walkConfig)
 
+// WalkOperandsBackwards walks the operands of the expression backwards
+// which is useful for the internal compilation process which generates
+// virtual machine instructions.
 var WalkOperandsBackwards = WalkOption(func(c *walkConfig) {
 	c.flags |= walkBackwards
 })

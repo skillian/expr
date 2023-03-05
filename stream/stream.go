@@ -2,11 +2,10 @@ package stream
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 
-	"github.com/skillian/ctxutil"
+	"github.com/skillian/errors"
 	"github.com/skillian/expr"
 )
 
@@ -18,22 +17,38 @@ type Streamer interface {
 	Var() expr.Var
 }
 
+// EachFunc is a function passed to Each and called for each value retrieved
+// while iterating elements from the stream.
+type EachFunc[TState, TValue any] func(context.Context, Stream, TState, TValue) error
+
 type eachStateType[TState, TValue any] struct {
 	sr    Streamer
 	state TState
-	f     func(ctx context.Context, s Stream, state TState, v TValue) error
+	f     EachFunc[TState, TValue]
 }
 
 // Each executes f on each element in the streamer.
-func Each[TState, TValue any](ctx context.Context, sr Streamer, state TState, f func(ctx context.Context, s Stream, state TState, v TValue) error) error {
+func Each[TState, TValue any](
+	ctx context.Context, sr Streamer, state TState, f EachFunc[TState, TValue],
+) error {
 	return expr.WithEvalContext(ctx, eachStateType[TState, TValue]{sr, state, f}, func(
 		ctx context.Context, state2 eachStateType[TState, TValue],
 	) error {
 		sr, state, f := state2.sr, state2.state, state2.f
-		vs, ok := expr.ValuesFromContextOK(ctx)
-		if !ok {
-			vs = expr.NewValues()
-			ctx = ctxutil.WithValue(ctx, expr.ValuesContextKey(), vs)
+		ctx, vs := expr.GetOrAddValuesToContext(ctx)
+		va := sr.Var()
+		if _, err := vs.Get(ctx, va); errors.Is(err, expr.ErrNotFound) {
+			var v TValue
+			if err2 := vs.Set(ctx, va, &v); err2 != nil {
+				return errors.ErrorfWithCauseAndContext(
+					err2, err,
+					"failed to initialize "+
+						"streamer variable %v "+
+						"with model %[2]T: "+
+						"%[2]v",
+					sr, &v,
+				)
+			}
 		}
 		s, err := sr.Stream(ctx)
 		if err != nil {

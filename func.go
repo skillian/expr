@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,10 @@ import (
 
 var (
 	ErrInvalidArgc = errors.New("invalid argument count")
+
+	// ErrInvalidType indicates that one or more objects' types are
+	// incompatible with some operation.  This error should usually
+	// be wrapped to include more specific information.
 	ErrInvalidType = errors.New("invalid type")
 )
 
@@ -24,6 +29,8 @@ var (
 // and the remaining expressions are the arguments.
 type Call []Expr
 
+// Operands return the operands of the call expression; the first of
+// which is the function to be called.
 func (x Call) Operands() []Expr { return ([]Expr)(x) }
 
 func (x Call) String() string { return buildString(x) }
@@ -38,14 +45,22 @@ func (x Call) appendString(sb *strings.Builder) {
 	sb.WriteByte(')')
 }
 
-// Func is a function expression that can actually be called during
+// Func is a function expression that can be called during
 // evaluation.
+//
+// Function expressions are often compiled with operands with specific
+// types
 type Func interface {
 	Expr
 	Call(context.Context, Values) (interface{}, error)
 }
 
+// funcFromExpr compiles the expression, e, into a function.
 func funcFromExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
+	// Currently, functions are "statically" "compiled" where
+	// specific VM op-codes are generated based on the function's
+	// parameter types (the "static" part) into a sequence of
+	// virtual instructions (the "compiled" part).
 	bv := exprFuncBuilders.Get()
 	defer exprFuncBuilders.Put(bv)
 	b := bv.(*exprFuncBuilder)
@@ -279,9 +294,9 @@ func (b *exprFuncBuilder) checkType(op opCode, fr *efbStackFrame) (returnType ee
 		t2 = fr.opers[len(fr.opers)-2].t
 		errFmt = "%[1]w: %#[3]v %[2]v %#[4]v"
 	}
-	returnType = t.typeCheck(fr.e, t2)
-	if returnType == nil {
-		err = fmt.Errorf(errFmt, ErrInvalidType, op, t, t2)
+	returnType, err = t.typeCheck(fr.e, t2)
+	if err != nil {
+		err = fmt.Errorf(errFmt, err, op, t, t2)
 	}
 	return
 }
@@ -489,18 +504,92 @@ func (b *exprFuncBuilder) getAllOps() []opCode {
 }
 
 // opFunc is an implementation of the Func interface.
+//
+// opFunc contains a sequence of `opCode`s, and an optional collection
+// of constant values with which those `opCode`s can execute as
+// operands.
 type opFunc struct {
-	ops       []opCode
+	// ops is the sequence of instructions that this package's
+	// virtual machine carries out to execute the function.
+	ops []opCode
+
+	// constKeys are indexes into the `consts` from which constant
+	// values are retrieved during the execution of this function.
 	constkeys []eeValueKey
-	consts    eeValues
+
+	// consts are a collection of constant values bound to and
+	// referenced by this function.
+	consts eeValues
 }
 
-func (f *opFunc) String() string {
-	ops := make([]string, len(f.ops))
-	for i, op := range f.ops {
-		ops[i] = fmt.Sprint(op)
+// opDasmAppendTo disassembles a function into a string builder.
+// If pc is greater than or equal to zero, an arrow is inserted at that
+// index into f's op codes to show where an error occurred.
+// An optional `indent` prefix can be inserted, for example, if this
+// function is being called from another function to format a function.
+func (f *opFunc) opDasmAppendTo(sb *strings.Builder, pc int, indent string) error {
+	funcOpArgString := func(f *opFunc, op opCode, i int, arg int64) string {
+		switch op {
+		case opLdc:
+			ck := f.constkeys[int(arg)]
+			v := f.consts.types[ck.typeIndex].get(&f.consts, ck.valIndex)
+			return fmt.Sprintf("%[1]v (type: %[1]T)", v)
+		case opPackSlice:
+			if i == 1 {
+				return "" // fine as just numeric value.
+			}
+			fallthrough // else, it's 0: the type param:
+		case opConv1, opConv2:
+			t := f.consts.types[int(arg)]
+			return fmt.Sprintf("%[1]v (metatype: %[1]T)", t)
+		}
+		panic(fmt.Errorf("unexpected op: %v", op))
 	}
-	return fmt.Sprintf("(%[1]T)(%[1]p){%s}", f, strings.Join(ops, ", "))
+	var indexCache [2]int64
+	for i := 0; i < len(f.ops); i++ {
+		op := f.ops[i]
+		indexes := indexCache[:op.nargs()]
+		for j := range indexes {
+			i64, n := getIntFromOpCodes(f.ops[i+1:])
+			i += n
+			indexes[j] = i64
+		}
+		sb.WriteString(indent)
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteByte('\t')
+		if i == pc {
+			sb.WriteString("->")
+		}
+		sb.WriteByte('\t')
+		sb.WriteString(op.String())
+		if len(indexes) > 0 {
+			sb.WriteByte('\t')
+			for j, x := range indexes {
+				if j > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(strconv.FormatInt(x, 16))
+				sb.WriteString(" (")
+				sb.WriteString(strconv.FormatInt(x, 10))
+				if s := funcOpArgString(f, op, j, x); s != "" {
+					sb.WriteString(": ")
+					sb.WriteString(s)
+				}
+				sb.WriteByte(')')
+			}
+		}
+		sb.WriteByte('\n')
+	}
+	return nil
+}
+
+// String produces a string representation of the function
+func (f *opFunc) String() string {
+	sb := strings.Builder{}
+	if err := f.opDasmAppendTo(&sb, -1, ""); err != nil {
+		return strings.Join([]string{"<error: ", err.Error(), ">"}, "")
+	}
+	return sb.String()
 }
 
 var _ interface {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"unsafe"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/expr"
@@ -69,10 +70,12 @@ func TestExprKinds(t *testing.T) {
 }
 
 func TestMemOf(t *testing.T) {
+	var temp [8]uint64
 	type S0 struct {
 		I0 int
 	}
-	m := expr.MemOf(dummyVar, func(x *S0) *int { return &x.I0 })
+	s0 := (*S0)(unsafe.Pointer(&temp))
+	m := expr.MemOf(dummyVar, s0, &s0.I0)
 	if m[1] != 0 {
 		t.Fatalf("expected member 0 == 0, not %[1]#v (type: %[1]T)", m[1])
 	}
@@ -82,11 +85,12 @@ func TestMemOf(t *testing.T) {
 		S0 string
 		S1 string
 	}
-	m = expr.MemOf(dummyVar, func(x *S1) *string { return &x.S0 })
+	s1 := (*S1)(unsafe.Pointer(&temp))
+	m = expr.MemOf(dummyVar, s1, &s1.S0)
 	if m[1] != 2 {
 		t.Fatalf("expected member 0 == 2, not %[1]#v (type: %[1]T)", m[1])
 	}
-	m = expr.MemOf(dummyVar, func(x *S1) *string { return &x.S1 })
+	m = expr.MemOf(dummyVar, s1, &s1.S1)
 	if m[1] != 3 {
 		t.Fatalf("expected member 0 == 3, not %[1]#v (type: %[1]T)", m[1])
 	}

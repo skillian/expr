@@ -61,10 +61,8 @@ func FuncOf(ctx context.Context, e Expr, vs Values) (Func, error) {
 // WithEvalContext adds an expression evaluator to the context and calls
 // f with the new context.
 //
-// This is a leaky implementation detail, with which I'm not yet sure
-// how to handle best.  Evaluating expressions currently uses a virtual
-// machine that is not safe for concurrent use.  The opFunc's Call
-// method
+// This is a leaky implementation detail which I'm not yet sure
+// how to handle best.
 func WithEvalContext[T any](ctx context.Context, state T, f func(ctx context.Context, state T) error) error {
 	_, ok := ctxutil.Value(ctx, (*exprEvaluator)(nil)).(*exprEvaluator)
 	if !ok {
@@ -80,7 +78,7 @@ var exprEvaluators = sync.Pool{
 	New: func() any {
 		ee := &exprEvaluator{
 			ctx: eeCtx{
-				strcmp: strings.Compare,
+				strcmpfn: strings.Compare,
 			},
 		}
 		ee.putMathBigRat(ee.getMathBigRat())
@@ -113,7 +111,7 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (er
 			err = fmt.Errorf("%v", v)
 		}
 		sb := strings.Builder{}
-		opDasmAppendTo(&sb, f, "")
+		f.opDasmAppendTo(&sb, *pc, "")
 		err = fmt.Errorf(
 			"error in %v, pc: %d:\n%s\nerror: %w",
 			f, *pc, sb.String(), err,
@@ -132,15 +130,13 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (er
 		case opNot:
 			n := ee.stack.popNum()
 			ee.stack.pushNum(eeNumBool(!(*n.bool())))
-			ee.stack.pushType(boolType)
+			// ee.stack.pushType(boolType)
 		case opAnd:
-			a, b := eeBoolType{}.pop2Bool(&ee.stack)
+			a, b := eeBoolType{}.pop2Bool1Type(&ee.stack)
 			ee.stack.pushNum(eeNumBool(a && b))
-			ee.stack.pushType(boolType)
 		case opOr:
-			a, b := eeBoolType{}.pop2Bool(&ee.stack)
+			a, b := eeBoolType{}.pop2Bool1Type(&ee.stack)
 			ee.stack.pushNum(eeNumBool(a || b))
-			ee.stack.pushType(boolType)
 		case opEq:
 			ee.stack.pushNum(eeNumBool(et.eq(ee)))
 			ee.stack.pushType(boolType)
@@ -290,23 +286,39 @@ func (ee *exprEvaluator) putMathBigRat(r *big.Rat) {
 }
 
 // eeCtx holds contextual information used when evaluating an
-// expression.  It's similar to context.Context, but context.Context
-// can be wrapped with context.WithValue, context.WithTimeout, etc.
-// within the same expression, so it has to be passed normally.  Things
-// like FloatTolerance and string comparison makes sense (to me,
-// anyway) to make static throughout the expression.
+// expression.
 type eeCtx struct {
-	// floatTol is set from the FloatTolerance
+	// floatTol is set from the FloatTolerance and defines
+	// the absolute value within which two float64 values must
+	// be in order to be considered equal.
 	floatTol float64
-	streqfn  func(a, b string) bool
-	strcmp   func(a, b string) int
+
+	// streqfn is a string equality function that determines if
+	// two strings are considered equal.
+	streqfn func(a, b string) bool
+
+	// strcmpfn is a string comparison function that determines the
+	// relative sort order of two strings.
+	strcmpfn func(a, b string) int
 }
 
+// streq compares two strings for equality.
 func (c eeCtx) streq(a, b string) bool {
 	if c.streqfn != nil {
 		return c.streqfn(a, b)
 	}
-	return c.strcmp(a, b) == 0
+	if c.strcmpfn != nil {
+		return c.strcmpfn(a, b) == 0
+	}
+	return a == b
+}
+
+// streq compares the relative sort order of two strings.
+func (c eeCtx) strcmp(a, b string) int {
+	if c.strcmpfn != nil {
+		return c.strcmpfn(a, b)
+	}
+	return strings.Compare(a, b)
 }
 
 // eeValues is an ordered collection of values of arbitrary types,
@@ -349,6 +361,8 @@ func (vs *eeValues) reset() {
 	vs.anys = vs.anys[:0]
 }
 
+// append a value to the proper sub-stack.  If t is not provided,
+// it is computed via eeTypeOf.
 func (vs *eeValues) append(v interface{}, t eeType) (k eeValueKey) {
 	if t == nil {
 		t = eeTypeOf(v)
@@ -358,59 +372,79 @@ func (vs *eeValues) append(v interface{}, t eeType) (k eeValueKey) {
 	return
 }
 
+// appendType appends just an eeType to the type stack.
 func (vs *eeValues) appendType(v eeType) (i int) {
 	i = len(vs.types)
 	vs.types = append(vs.types, v)
 	return
 }
 
+// appendNum appends just an eeNum to the num stack.
 func (vs *eeValues) appendNum(v eeNum) (i int) {
 	i = len(vs.nums)
 	vs.nums = append(vs.nums, v)
 	return
 }
 
+// appendStr appends just a string to the str stack.
 func (vs *eeValues) appendStr(v string) (i int) {
 	i = len(vs.strs)
 	vs.strs = append(vs.strs, v)
 	return
 }
 
+// appendAny appends just an interface{} to the any stack.
 func (vs *eeValues) appendAny(v interface{}) (i int) {
 	i = len(vs.anys)
 	vs.anys = append(vs.anys, v)
 	return
 }
 
+// get retrieves a specific value from the collection of values by
+// a key.
 func (vs *eeValues) get(k eeValueKey) interface{} {
 	return vs.types[k.typeIndex].get(vs, k.valIndex)
 }
 
+// set assigns a specific value to the collection of values by
+// a key.
 func (vs *eeValues) set(k eeValueKey, v interface{}) {
 	vs.types[k.typeIndex].set(vs, k.valIndex, v)
 }
 
+// eeValueKey is an index into an `*eeValues` collection which
+// includes a "magic" `typeIndex` value which identifies the underlying
+// slice within the `eeValues` collection and a `valIndex` which
+// identifies a value in that "subslice."
 type eeValueKey struct {
 	typeIndex int
 	valIndex  int
 }
 
+// eeStack is the same data structure as `eeValues`, but behaves like
+// a stack.
 type eeStack eeValues
 
+// init passes through to the underlying `*eeValues.init` function.
 func (es *eeStack) init(caps int) {
 	((*eeValues)(es)).init(caps)
 }
 
+// reset passes through to the underlying `*eeValues.reset` function.
 func (es *eeStack) reset() {
 	((*eeValues)(es)).reset()
 }
 
+// peek retrieves the value and its type from the top of the stack
+// without removing either.
 func (es *eeStack) peek() (v interface{}, t eeType) {
 	t = es.peekType()
 	v = t.peek(es)
 	return
 }
 
+// po retrieves and removes both the value and its type from the top of
+// the stack.
 func (es *eeStack) pop() (v interface{}, t eeType) {
 	t = es.popType()
 	v = t.pop(es)
@@ -477,35 +511,78 @@ func (es *eeStack) pushAny(v interface{}) {
 	_ = ((*eeValues)(es)).appendAny(v)
 }
 
+// eeNum is a union of values that fit within a uint64.  As of
+// 2022-10-18, the possible types are:
+//
+// - bool
+// - int
+// - int64
+// - float64
 type eeNum struct {
 	data uint64
 }
 
+// eeNumBool creates an eeNum from a boolean value.
 func eeNumBool(v bool) (n eeNum) {
 	*n.bool() = v
 	return
 }
 
+// eeNumInt creates an eeNum from an int value.
 func eeNumInt(v int) (n eeNum) {
 	*n.int() = v
 	return
 }
 
+// eeNumInt64 creates an eeNum from an int64 value.
 func eeNumInt64(v int64) (n eeNum) {
 	*n.int64() = v
 	return
 }
 
+// eeNumFloat64 creates an eeNum from an float64 value.
 func eeNumFloat64(v float64) (n eeNum) {
 	*n.float64() = v
 	return
 }
 
-func (n *eeNum) bool() *bool       { return (*bool)(unsafe.Pointer(&n.data)) }
-func (n *eeNum) int() *int         { return (*int)(unsafe.Pointer(&n.data)) }
-func (n *eeNum) int64() *int64     { return (*int64)(unsafe.Pointer(&n.data)) }
+// bool gets the bool value stored in the eeNum.
+//
+// The behavior is undefined when the value initially stored into the
+// eeNum was _not_ a bool.  This function just reinterprets the memory
+// in the eeNum as a bool, however the Go runtime stores it.
+func (n *eeNum) bool() *bool { return (*bool)(unsafe.Pointer(&n.data)) }
+
+// int gets the eeNum as an int value.
+//
+// The behavior is undefined when the value initially stored into the
+// eeNum was _not_ an int.  This function just reinterprets the memory
+// in the eeNum as a int, however the Go runtime stores it.
+func (n *eeNum) int() *int { return (*int)(unsafe.Pointer(&n.data)) }
+
+// int64 gets the eeNum as an int64 value.
+//
+// The behavior is undefined when the value initially stored into the
+// eeNum was _not_ an int64.  This function just reinterprets the memory
+// in the eeNum as a int64, however the Go runtime stores it.
+func (n *eeNum) int64() *int64 { return (*int64)(unsafe.Pointer(&n.data)) }
+
+// float64 gets the eeNum as an float64 value.
+//
+// The behavior is undefined when the value initially stored into the
+// eeNum was _not_ an float64.  This function just reinterprets the
+// memory in the eeNum as a float64, however the Go runtime stores it.
 func (n *eeNum) float64() *float64 { return (*float64)(unsafe.Pointer(&n.data)) }
 
+// eeType is an expression evaluator type object which is the basic
+// interface required to process values within the expression
+// evaluator.
+//
+// Most operations within the expression evaluator assume that their
+// operands are of the proper type.  Any type checking should happen
+// outside of the expression evaluator's execution.  A notable exception
+// is the `typeCheck` function which is called during expression
+// compilation to ensure that types are supported.
 type eeType interface {
 	// eq compares two values at the top of the stack of type eeType
 	// for equality
@@ -539,8 +616,7 @@ type eeType interface {
 
 	// typeCheck is used during function generation to check if the
 	// given operation is compatible with the other operand.
-	// Incompatible operations should return a nil eeType.
-	typeCheck(e Expr, t2 eeType) eeType
+	typeCheck(e Expr, t2 eeType) (eeType, error)
 
 	reflectType() reflect.Type
 }
@@ -769,7 +845,7 @@ func (eeBoolType) appendZero(vs *eeValues) int {
 }
 
 func (eeBoolType) eq(ee *exprEvaluator) bool {
-	a, b := eeBoolType{}.pop2Bool(&ee.stack)
+	a, b := eeBoolType{}.pop2Bool1Type(&ee.stack)
 	return a == b
 }
 
@@ -795,22 +871,22 @@ func (eeBoolType) copy(dest *eeValues, j int, src *eeValues, i int) {
 	dest.nums[j] = src.nums[i]
 }
 
-func (eeBoolType) typeCheck(e Expr, t2 eeType) eeType {
+func (eeBoolType) typeCheck(e Expr, t2 eeType) (eeType, error) {
 	switch e.(type) {
 	case Not:
 		if t2 == nil {
-			return boolType
+			return boolType, nil
 		}
 	case And, Or, Eq, Ne:
 		if t2 == boolType {
-			return boolType
+			return boolType, nil
 		}
 	}
-	return nil
+	return nil, ErrInvalidType
 }
 
-func (eeBoolType) pop2Bool(es *eeStack) (a, b bool) {
-	_, _ = es.popType(), es.popType()
+func (eeBoolType) pop2Bool1Type(es *eeStack) (a, b bool) {
+	_ = es.popType()
 	an, bn := es.popNum(), es.popNum()
 	return *an.bool(), *bn.bool()
 }
@@ -859,19 +935,19 @@ func (t *numType) sub(ee *exprEvaluator)                            { ee.stack.p
 
 func (t *numType) reflectType() reflect.Type { return t.impl.reflectType() }
 
-func (t *numType) typeCheck(e Expr, t2 eeType) eeType {
+func (t *numType) typeCheck(e Expr, t2 eeType) (eeType, error) {
 	if t != t2 {
-		return nil
+		return nil, ErrInvalidType
 	}
 	// by default, only support comparisson and arithmetic,
 	// and return the same type.
 	switch e.(type) {
 	case Eq, Ne, Gt, Ge, Lt, Le:
-		return boolType
+		return boolType, nil
 	case Add, Sub, Mul, Div:
-		return t2
+		return t2, nil
 	}
-	return nil
+	return nil, ErrInvalidType
 }
 
 func (t *numType) pop2Num(es *eeStack, bothTypes bool) (a, b eeNum) {
@@ -1168,25 +1244,25 @@ func (eeTimeType) sub(ee *exprEvaluator) {
 	))
 }
 
-func (eeTimeType) typeCheck(e Expr, t2 eeType) eeType {
+func (eeTimeType) typeCheck(e Expr, t2 eeType) (eeType, error) {
 	switch e.(type) {
 	case Eq, Ne, Gt, Ge, Lt, Le:
 		if t2 == timeType {
-			return timeType
+			return timeType, nil
 		}
 	case Add:
 		if t2 == timeDurationType {
-			return timeType
+			return timeType, nil
 		}
 	case Sub:
 		switch t2 {
 		case timeType:
-			return timeDurationType
+			return timeDurationType, nil
 		case timeDurationType:
-			return timeType
+			return timeType, nil
 		}
 	}
-	return nil
+	return nil, ErrInvalidType
 }
 
 var reflectTimeType = reflect.TypeOf((*time.Time)(nil)).Elem()
@@ -1228,7 +1304,7 @@ func (t *eeTupleType) eq(ee *exprEvaluator) bool {
 		//
 		ta := eeTypeOf(eq[0])
 		tb := eeTypeOf(eq[1])
-		if ta.typeCheck(eq, tb) != boolType {
+		if t, err := ta.typeCheck(eq, tb); err != nil || t != boolType {
 			return false
 		}
 		ee.stack.push(eq[1], tb)
@@ -1244,19 +1320,19 @@ var reflectSliceOfAnyType = reflect.TypeOf((*[]interface{})(nil)).Elem()
 
 func (t *eeTupleType) reflectType() reflect.Type { return t.rtype }
 
-func (t *eeTupleType) typeCheck(e Expr, t2 eeType) eeType {
+func (t *eeTupleType) typeCheck(e Expr, t2 eeType) (eeType, error) {
 	tt2, ok := t2.(*eeTupleType)
 	if !ok {
-		return nil
+		return nil, ErrInvalidType
 	}
 	if tt2 != t {
-		return nil
+		return nil, ErrInvalidType
 	}
 	switch e.(type) {
 	case Eq, Ne:
-		return boolType
+		return boolType, nil
 	}
-	return nil
+	return nil, ErrInvalidType
 }
 
 type eeAnyType struct{}
@@ -1324,17 +1400,17 @@ var reflectMathBigRatType = reflect.TypeOf((*big.Rat)(nil))
 
 func (eeMathBigRatType) reflectType() reflect.Type { return reflectMathBigRatType }
 
-func (eeMathBigRatType) typeCheck(e Expr, t2 eeType) eeType {
+func (eeMathBigRatType) typeCheck(e Expr, t2 eeType) (eeType, error) {
 	if t2 != mathBigRatType {
-		return nil
+		return nil, ErrInvalidType
 	}
 	switch e.(type) {
 	case Eq, Ne, Gt, Ge, Lt, Le:
-		return boolType
+		return boolType, nil
 	case Add, Sub, Mul, Div:
-		return mathBigRatType
+		return mathBigRatType, nil
 	}
-	return nil
+	return nil, ErrInvalidType
 }
 
 func (eeMathBigRatType) pop2BigRat(es *eeStack, bothTypes bool) (a, b *big.Rat) {
@@ -1377,18 +1453,18 @@ var reflectStringType = reflect.TypeOf((*string)(nil)).Elem()
 
 func (eeStringType) reflectType() reflect.Type { return reflectStringType }
 
-func (eeStringType) typeCheck(e Expr, t2 eeType) eeType {
+func (eeStringType) typeCheck(e Expr, t2 eeType) (eeType, error) {
 	switch e.(type) {
 	case Eq, Ne, Gt, Ge, Lt, Le:
 		if t2 == stringType {
-			return boolType
+			return boolType, nil
 		}
 	case Add:
 		if t2 == stringType {
-			return stringType
+			return stringType, nil
 		}
 	}
-	return nil
+	return nil, ErrInvalidType
 }
 
 func (eeStringType) pop2String(es *eeStack) (a, b string) {
@@ -1407,14 +1483,14 @@ var _ interface {
 	eeType
 } = (*eeVarType)(nil)
 
-func (t eeVarType) typeCheck(e Expr, t2 eeType) eeType {
+func (t eeVarType) typeCheck(e Expr, t2 eeType) (eeType, error) {
 	return t.valueType.typeCheck(e, t2)
 }
 
 func (t eeVarType) reflectType() reflect.Type { return t.valueType.reflectType() }
 
 type eeMem interface {
-	memType() eeType
+	memType() (eeType, error)
 	get(ee *exprEvaluator)
 	ref(ee *exprEvaluator)
 	set(ee *exprEvaluator)
@@ -1439,18 +1515,19 @@ func (rt *eeReflectType) mem(ee *exprEvaluator) eeMem {
 	return rt.mems[*n.int()]
 }
 
-func (rt *eeReflectType) typeCheck(e Expr, t2 eeType) eeType {
+func (rt *eeReflectType) typeCheck(e Expr, t2 eeType) (eeType, error) {
+	rt2, rt2Ok := t2.(*eeReflectType)
 	switch e := e.(type) {
 	case Eq, Ne:
-		if t2 == rt {
-			return boolType
+		if rt2Ok && rt2 == rt {
+			return boolType, nil
 		}
 	case Mem:
 		if i, ok := e[1].(int); ok {
 			return rt.mems[i].memType()
 		}
 	}
-	return nil
+	return nil, ErrInvalidType
 }
 
 func (rt *eeReflectType) reflectType() reflect.Type { return rt.rtype }
@@ -1492,7 +1569,7 @@ func (sf *eeStructField) set(ee *exprEvaluator) {
 	sf.field(ee).Set(reflect.ValueOf(v))
 }
 
-func (sf *eeStructField) memType() eeType { return sf.et }
+func (sf *eeStructField) memType() (eeType, error) { return sf.et, nil }
 
 func (sf *eeStructField) field(ee *exprEvaluator) reflect.Value {
 	v, _ := ee.stack.pop()
@@ -1529,7 +1606,7 @@ func (m *eeReflectMethodMem) set(ee *exprEvaluator) {
 	})
 }
 
-func (m *eeReflectMethodMem) memType() eeType { return m.valueType }
+func (m *eeReflectMethodMem) memType() (eeType, error) { return m.valueType, nil }
 
 type eeReflectMapType struct {
 	eeAnyType
@@ -1561,12 +1638,12 @@ func (t *eeReflectMapType) setKey(ee *exprEvaluator) {
 
 func (t *eeReflectMapType) reflectType() reflect.Type { return t.mapRType }
 
-func (t *eeReflectMapType) typeCheck(e Expr, t2 eeType) eeType {
+func (t *eeReflectMapType) typeCheck(e Expr, t2 eeType) (eeType, error) {
 	switch e.(type) {
 	case Eq, Ne:
-		return boolType
+		return boolType, nil
 	case Mem:
-		return t.valueType
+		return t.valueType, nil
 	}
-	return nil
+	return nil, ErrInvalidType
 }
