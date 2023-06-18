@@ -72,7 +72,7 @@ func (f *localFilter) initNext(ctx context.Context) error {
 	// compilation must happen here because only here
 	// do the required variables have values of the proper
 	// type.
-	f.f, err = expr.FuncOf(ctx, f.e, vs)
+	f.f, err = expr.FuncOfExpr(ctx, f.e, vs)
 	if err != nil {
 		return fmt.Errorf(
 			"failed to compile local filter %v's filter "+
@@ -177,7 +177,7 @@ func (m *localMap) initNext(ctx context.Context) error {
 	// compilation must happen here because only here
 	// do the required variables have values of the proper
 	// type.
-	m.f, err = expr.FuncOf(ctx, m.e, vs)
+	m.f, err = expr.FuncOfExpr(ctx, m.e, vs)
 	if err != nil {
 		return fmt.Errorf(
 			"failed to compile map expression %v: %w",
@@ -293,9 +293,9 @@ func (j *localJoin) initNext(ctx context.Context) error {
 	// do the required variables have values of the proper
 	// type.
 	what, e := "when", j.joiner.when
-	if j.when, err = expr.FuncOf(ctx, e, vs); err == nil {
+	if j.when, err = expr.FuncOfExpr(ctx, e, vs); err == nil {
 		what, e = "then", j.joiner.then
-		j.then, err = expr.FuncOf(ctx, e, vs)
+		j.then, err = expr.FuncOfExpr(ctx, e, vs)
 	}
 	if err != nil {
 		return fmt.Errorf(

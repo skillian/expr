@@ -31,16 +31,16 @@ type eachStateType[TState, TValue any] struct {
 func Each[TState, TValue any](
 	ctx context.Context, sr Streamer, state TState, f EachFunc[TState, TValue],
 ) error {
-	return expr.WithEvalContext(ctx, eachStateType[TState, TValue]{sr, state, f}, func(
+	_, err := expr.WithEvalContext(ctx, eachStateType[TState, TValue]{sr, state, f}, func(
 		ctx context.Context, state2 eachStateType[TState, TValue],
-	) error {
+	) (struct{}, error) {
 		sr, state, f := state2.sr, state2.state, state2.f
 		ctx, vs := expr.GetOrAddValuesToContext(ctx)
 		va := sr.Var()
 		if _, err := vs.Get(ctx, va); errors.Is(err, expr.ErrNotFound) {
 			var v TValue
 			if err2 := vs.Set(ctx, va, &v); err2 != nil {
-				return errors.ErrorfWithCauseAndContext(
+				return struct{}{}, errors.ErrorfWithCauseAndContext(
 					err2, err,
 					"failed to initialize "+
 						"streamer variable %v "+
@@ -52,36 +52,37 @@ func Each[TState, TValue any](
 		}
 		s, err := sr.Stream(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to create stream from %v: %w", sr, err)
+			return struct{}{}, fmt.Errorf("failed to create stream from %v: %w", sr, err)
 		}
 		for {
 			if err := s.Next(ctx); err != nil {
 				if errors.Is(err, io.EOF) {
-					return nil
+					return struct{}{}, nil
 				}
-				return fmt.Errorf(
+				return struct{}{}, fmt.Errorf(
 					"error from %v.Next: %w", s, err,
 				)
 			}
 			v, err := vs.Get(ctx, s.Var())
 			if err != nil {
-				return fmt.Errorf(
+				return struct{}{}, fmt.Errorf(
 					"failed to get value associated with stream %v: %w",
 					s, err,
 				)
 			}
 			v2, ok := v.(TValue)
 			if !ok {
-				return fmt.Errorf(
+				return struct{}{}, fmt.Errorf(
 					"%w: expected %T, but actual: %#[2]v (type: %[2]T)",
 					expr.ErrInvalidType, v2, v,
 				)
 			}
 			if err = f(ctx, s, state, v2); err != nil {
-				return err
+				return struct{}{}, err
 			}
 		}
 	})
+	return err
 }
 
 // Stream is a stream of values.  The first call to Next initializes

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/skillian/expr"
+	"github.com/skillian/logging"
 )
 
 type evalTest struct {
@@ -19,6 +20,7 @@ type evalTest struct {
 
 var evalTests = []evalTest{
 	{expr.Not{true}, nil, false, ""},
+	{expr.Not{2}, nil, -3, ""},
 	{expr.Eq{1, 1}, nil, true, ""},
 	{expr.Eq{big.NewRat(1, 1), big.NewRat(2, 1)}, nil, false, ""},
 	{expr.Eq{false, false}, nil, true, ""},
@@ -77,7 +79,7 @@ var evalTests = []evalTest{
 	{expr.Div{big.NewRat(1, 1), 1}, nil, big.NewRat(1, 1), ""},
 
 	// member access:
-	{expr.Mem{map[string]string{"hello": "world"}, "hello"}, nil, "world", ""},
+	{expr.Mem{map[string]interface{}{"hello": "world"}, "hello"}, nil, "world", ""},
 	{expr.Mem{&(struct{ A string }{A: "helloWorld"}), 0}, nil, "helloWorld", ""},
 	{expr.Mem{expr.Mem{&TestOuter{Inner: TestInner{S: "asdf"}}, 0}, 0}, nil, "asdf", ""},
 	{expr.Mem{expr.Mem{&TestOuter2{Inner: &TestInner{S: "asdf"}}, 0}, 0}, nil, "asdf", ""},
@@ -99,11 +101,16 @@ var evalTests = []evalTest{
 	{expr.Eq{expr.Tuple{1, 2}, expr.Tuple{1, 2}}, nil, true, ""},
 
 	// negative tests:
-	// {expr.Not{2}, nil, false, "invalid type"},
 }
 
 func TestEval(t *testing.T) {
-	ctx := expr.WithFuncCache(context.Background())
+	testCtx := expr.WithFuncCache(context.Background())
+	closeHandler := logging.TestingHandler(
+		logger, t,
+		logging.HandlerFormatter(logging.GoFormatter{}),
+		logging.HandlerLevel(logging.EverythingLevel),
+	)
+	defer closeHandler()
 	for i := 0; i < 2; i++ {
 		// run tests twice to test function caching
 		for _, tc := range evalTests {
@@ -112,7 +119,13 @@ func TestEval(t *testing.T) {
 				if len(tc.varVals) > 0 {
 					vs = expr.NewValues(tc.varVals...)
 				}
-				res, err := expr.Eval(ctx, tc.e, vs)
+				ctx := expr.AddValuesToContext(testCtx, vs)
+				f, err := expr.FuncOfExpr(ctx, tc.e, vs)
+				if err != nil {
+					t.Logf("%v:\n%v", tc.e, f)
+				}
+				handleErr(t, err, tc.err)
+				res, err := f.Call(ctx, vs)
 				handleErr(t, err, tc.err)
 				if !eq(res, tc.expect) {
 					t.Fatalf(

@@ -3,71 +3,20 @@ package expr_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"unsafe"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/expr"
+	"github.com/skillian/logging"
 )
 
-type exprKind uint8
-
-const (
-	invalidKind exprKind = iota
-	unaryKind
-	binaryKind
+var (
+	logger = logging.GetLogger(
+		expr.PkgName,
+		logging.LoggerLevel(logging.EverythingLevel),
+	)
 )
-
-func (k exprKind) String() string {
-	return ([...]string{"invalid", "unary", "binary"})[int(k)]
-}
-
-func exprKindOf(e expr.Expr) exprKind {
-	switch e.(type) {
-	case expr.Unary:
-		return unaryKind
-	case expr.Binary:
-		return binaryKind
-	}
-	return invalidKind
-}
-
-type exprKindTest struct {
-	e expr.Expr
-	k exprKind
-}
-
-var exprKindTests = []exprKindTest{
-	{expr.Not{}, unaryKind},
-	{expr.Eq{}, binaryKind},
-	{expr.Ne{}, binaryKind},
-	{expr.Gt{}, binaryKind},
-	{expr.Ge{}, binaryKind},
-	{expr.Lt{}, binaryKind},
-	{expr.Le{}, binaryKind},
-	{expr.And{}, binaryKind},
-	{expr.Or{}, binaryKind},
-	{expr.Add{}, binaryKind},
-	{expr.Sub{}, binaryKind},
-	{expr.Mul{}, binaryKind},
-	{expr.Div{}, binaryKind},
-	{expr.Mem{}, binaryKind},
-}
-
-func TestExprKinds(t *testing.T) {
-	for _, tc := range exprKindTests {
-		t.Run(fmt.Sprintf("%T", tc.e), func(t *testing.T) {
-			k := exprKindOf(tc.e)
-			if k != tc.k {
-				t.Fatalf(
-					"expected %T == %v. Actual: %v",
-					tc.e, tc.k, k,
-				)
-			}
-		})
-	}
-}
 
 func TestMemOf(t *testing.T) {
 	var temp [8]uint64

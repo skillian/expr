@@ -11,6 +11,13 @@ import (
 	"sync"
 
 	"github.com/skillian/ctxutil"
+	"github.com/skillian/logging"
+)
+
+const PkgName = "github.com/skillian/expr"
+
+var (
+	logger = logging.GetLogger(PkgName)
 )
 
 // Expr is a basic expression
@@ -19,7 +26,22 @@ type Expr interface{}
 // Tuple is a finite ordered sequence of expressions.
 type Tuple []Expr
 
-func (t Tuple) Operands() []Expr { return ([]Expr)(t) }
+func (t Tuple) Eq(t2 Tuple) bool {
+	if len(t) != len(t2) {
+		return false
+	}
+	var vs eeValues
+	for i, x := range t {
+		vs.push(t2[i])
+		et := typeOf(x)
+		et.push(&vs, x)
+		vs.pushType(et)
+		if !et.eq(&vs) {
+			return false
+		}
+	}
+	return true
+}
 
 // Unary is a unary (single-operand) expression, for example the negation
 // operator.
@@ -108,7 +130,6 @@ func (x Le) appendString(sb *strings.Builder) { appendBinary(sb, "le", x) }
 //	false && true == false
 //	true && false == false
 //	true && true == true
-//
 type And [2]Expr
 
 func (x And) Operands() [2]Expr { return ([2]Expr)(x) }
@@ -123,7 +144,6 @@ func (x And) appendString(sb *strings.Builder) { appendBinary(sb, "and", x) }
 //	false || true == true
 //	true || false == true
 //	true || true == true
-//
 type Or [2]Expr
 
 func (x Or) Operands() [2]Expr { return ([2]Expr)(x) }
@@ -247,8 +267,8 @@ func (x Mem) appendString(sb *strings.Builder) { appendBinary(sb, ".", x) }
 type Var interface {
 	Expr
 
-	// Var differentiates the Var from an Expr but could just
-	// return itself
+	// Var differentiates a Var from an Expr but could just
+	// return itself.
 	Var() Var
 }
 
@@ -263,6 +283,10 @@ type Values interface {
 	// Vars returns an iterator through the values' variables.  The
 	// returned iterator might be a VarValueIter.
 	Vars() VarIter
+}
+
+func AddValuesToContext(ctx context.Context, vs Values) context.Context {
+	return ctxutil.WithValue(ctx, ValuesContextKey(), vs)
 }
 
 func ValuesFromContextOK(ctx context.Context) (vs Values, ok bool) {
@@ -531,7 +555,7 @@ var tryLenOK, _ = func() (func(v interface{}) (int, bool), func(v interface{}) (
 			case nilPtr:
 				return 0, fmt.Errorf(
 					"%w: cannot get length of nil pointer",
-					errInvalidOp,
+					ErrInvalidType,
 				)
 			case badType:
 				return 0, fmt.Errorf("%w: %T", ErrInvalidType, v)
@@ -594,9 +618,7 @@ func appendBinary(sb *strings.Builder, op string, b Binary) {
 // HasOperands returns true if the expression has operands
 func HasOperands(e Expr) bool {
 	switch e.(type) {
-	case Unary:
-		return true
-	case Binary:
+	case Unary, Binary:
 		return true
 	case interface{ Operands() []Expr }:
 		return true
