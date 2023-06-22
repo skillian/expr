@@ -78,12 +78,13 @@ func _() {
 	_ = x[opConvRatToFloat64-67]
 	_ = x[opConvRatToInt64-68]
 	_ = x[opLdc-69]
-	_ = x[opBrt-70]
+	_ = x[opPackTuple-70]
+	_ = x[opBrt-71]
 }
 
-const _opCode_name = "NopRetDerefAnyDerefBoolDerefFloatDerefIntDerefStrLdvNotBoolNotIntEqAnyEqBoolEqFloatEqIntEqRatEqStrNeAnyNeBoolNeFloatNeIntNeRatNeStrLtAnyLtFloatLtIntLtRatLtStrLeAnyLeFloatLeIntLeRatLeStrGeAnyGeFloatGeIntGeRatGeStrGtAnyGtFloatGtIntGtRatGtStrAndBoolAndIntAndRatOrBoolOrIntOrRatAddFloatAddIntAddRatAddStrSubFloatSubIntSubRatMulFloatMulIntMulRatDivFloatDivIntDivRatLdmAnyIntLdmStrMapAnyConvFloat64ToInt64ConvFloat64ToRatConvInt64ToFloat64ConvInt64ToRatConvRatToFloat64ConvRatToInt64LdcBrt"
+const _opCode_name = "NopRetDerefAnyDerefBoolDerefFloatDerefIntDerefStrLdvNotBoolNotIntEqAnyEqBoolEqFloatEqIntEqRatEqStrNeAnyNeBoolNeFloatNeIntNeRatNeStrLtAnyLtFloatLtIntLtRatLtStrLeAnyLeFloatLeIntLeRatLeStrGeAnyGeFloatGeIntGeRatGeStrGtAnyGtFloatGtIntGtRatGtStrAndBoolAndIntAndRatOrBoolOrIntOrRatAddFloatAddIntAddRatAddStrSubFloatSubIntSubRatMulFloatMulIntMulRatDivFloatDivIntDivRatLdmAnyIntLdmStrMapAnyConvFloat64ToInt64ConvFloat64ToRatConvInt64ToFloat64ConvInt64ToRatConvRatToFloat64ConvRatToInt64LdcPackTupleBrt"
 
-var _opCode_index = [...]uint16{0, 3, 6, 14, 23, 33, 41, 49, 52, 59, 65, 70, 76, 83, 88, 93, 98, 103, 109, 116, 121, 126, 131, 136, 143, 148, 153, 158, 163, 170, 175, 180, 185, 190, 197, 202, 207, 212, 217, 224, 229, 234, 239, 246, 252, 258, 264, 269, 274, 282, 288, 294, 300, 308, 314, 320, 328, 334, 340, 348, 354, 360, 369, 381, 399, 415, 433, 447, 463, 477, 480, 483}
+var _opCode_index = [...]uint16{0, 3, 6, 14, 23, 33, 41, 49, 52, 59, 65, 70, 76, 83, 88, 93, 98, 103, 109, 116, 121, 126, 131, 136, 143, 148, 153, 158, 163, 170, 175, 180, 185, 190, 197, 202, 207, 212, 217, 224, 229, 234, 239, 246, 252, 258, 264, 269, 274, 282, 288, 294, 300, 308, 314, 320, 328, 334, 340, 348, 354, 360, 369, 381, 399, 415, 433, 447, 463, 477, 480, 489, 492}
 
 func (i opCode) String() string {
 	if i >= opCode(len(_opCode_index)-1) {

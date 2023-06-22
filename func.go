@@ -73,7 +73,12 @@ func funcFromExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
 	if b.err != nil {
 		return nil, b.err
 	}
-	return b.build()
+	f, err := b.build()
+	if err != nil {
+		return nil, err
+	}
+	logger.Debug2("expr: %v, func:\n%v", e, f)
+	return f, nil
 }
 
 func nameOfFunc(f Func) string {
@@ -210,6 +215,11 @@ func (b *exprFuncBuilder) walk(e Expr) bool {
 	switch op {
 	case opNop:
 		return b.walkVarOrValue(top, e)
+	case opPackTuple:
+		top.codes = append(top.codes, opPackTuple)
+		// TODO: come up with a way to just append integers:
+		top.codes = eeValueKey{data: uint(len(top.opers))}.appendToOpCodes(top.codes)
+		return true
 	}
 	t, err := b.checkType(op, top)
 	if err != nil {
@@ -224,6 +234,7 @@ func (b *exprFuncBuilder) walk(e Expr) bool {
 	case topIsMem && secIsMem && t.reflectType().Kind() != reflect.Ptr:
 		top.t = getType(reflect.PtrTo(t.reflectType()))
 	case topIsMem && !isMapMem:
+		// TODO: deref something other than Any?
 		top.codes = append(top.codes, opDerefAny)
 		fallthrough
 	default:
@@ -352,6 +363,8 @@ func (b *exprFuncBuilder) genOp() (opCode, error) {
 	}
 	top := b.peekFrame(0)
 	switch top.e.(type) {
+	case Tuple:
+		return opPackTuple, nil
 	case Not:
 		switch {
 		case checkKinds(top, opBool):

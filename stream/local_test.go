@@ -2,12 +2,14 @@ package stream_test
 
 import (
 	"context"
+	"path"
 	"reflect"
 	"testing"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/expr"
 	"github.com/skillian/expr/stream"
+	"github.com/skillian/logging"
 )
 
 type streamTest struct {
@@ -32,14 +34,14 @@ var streamTests = []streamTest{
 		sr2 := stream.Streamer(stream.SliceOf([]string{"a", "b"}))
 		return must(stream.Join(ctx, sr, sr2, true, expr.Tuple{sr.Var(), sr2.Var()}))
 	}, []interface{}{
-		[]interface{}{12, "a"},
-		[]interface{}{12, "b"},
-		[]interface{}{14, "a"},
-		[]interface{}{14, "b"},
-		[]interface{}{16, "a"},
-		[]interface{}{16, "b"},
-		[]interface{}{18, "a"},
-		[]interface{}{18, "b"},
+		expr.Tuple{12, "a"},
+		expr.Tuple{12, "b"},
+		expr.Tuple{14, "a"},
+		expr.Tuple{14, "b"},
+		expr.Tuple{16, "a"},
+		expr.Tuple{16, "b"},
+		expr.Tuple{18, "a"},
+		expr.Tuple{18, "b"},
 	}, ""},
 }
 
@@ -49,6 +51,15 @@ func TestStream(t *testing.T) {
 		tc := &streamTests[i]
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			defer logging.TestingHandler(
+				logging.GetLogger(
+					path.Join(expr.PkgName, "stream"),
+					logging.LoggerTemporary,
+					logging.LoggerPropagate(true),
+					logging.LoggerLevel(logging.EverythingLevel),
+				),
+				t, logging.HandlerFormatter(logging.GoFormatter{}),
+			)()
 			ctx := ctxutil.Background()
 			vs := new([]any)
 			*vs = make([]any, 0, 8)

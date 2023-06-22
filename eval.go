@@ -47,7 +47,7 @@ func FuncOfExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
 	return funcFromExpr(ctx, e, vs)
 }
 
-// WithEvalContext adds an expression evaluator to the contex
+// WithEvalContext adds an expression evaluator to the context
 func WithEvalContext[TState, TResult any](ctx context.Context, state TState, f func(context.Context, TState) (TResult, error)) (TResult, error) {
 	key := (*exprEvaluator)(nil).ContextKey()
 	eev := exprEvaluators.Get()
@@ -498,6 +498,13 @@ func (ee *exprEvaluator) eval(ctx context.Context) error {
 		case opLdc:
 			vk, _ := eeValueKeyFromOpCodes(extraOps)
 			ee.ff(0).fn.consts.copyTo(vk, &ee.eeValues)
+		case opPackTuple:
+			vk, _ := eeValueKeyFromOpCodes(extraOps)
+			t := make(Tuple, 0, int(vk.data))
+			for len(t) < cap(t) {
+				t = append(t, ee.eeValues.popType().pop(&ee.eeValues))
+			}
+			ee.eeValues.push(t)
 		default:
 			return fmt.Errorf(
 				"%w: %v",
@@ -874,6 +881,10 @@ const (
 	// implementation, but maybe a future version will.
 	opLdc
 
+	// opPackTuple is followed by an integer that indicates the
+	// number of values on the stack to be packed into a Tuple.
+	opPackTuple
+
 	// opBrt branches if the top value on the stack is true.
 	// This opCode has an int following it with the opCode offset
 	// to the branched code.
@@ -887,7 +898,7 @@ func (op opCode) length() int {
 		return 1
 	}
 	switch op {
-	case opLdc:
+	case opLdc, opPackTuple:
 		return 1 + int(unsafe.Sizeof(eeValueKey{}))
 	case opBrt:
 		return 1 + bits.UintSize/8

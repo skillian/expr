@@ -241,6 +241,7 @@ var (
 	int64Type     = reflect.TypeOf(int64(0))
 	stringType    = reflect.TypeOf("")
 	mapStrAnyType = reflect.TypeOf(map[string]interface{}(nil))
+	tupleType     = reflect.TypeOf(Tuple(nil))
 
 	defaultTypeInit = func() (ti eeTypeInit) {
 		ti.fn = func() {}

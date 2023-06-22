@@ -43,6 +43,8 @@ func (t Tuple) Eq(t2 Tuple) bool {
 	return true
 }
 
+func (t Tuple) Operands() []Expr { return []Expr(t) }
+
 // Unary is a unary (single-operand) expression, for example the negation
 // operator.
 type Unary interface {
@@ -285,10 +287,14 @@ type Values interface {
 	Vars() VarIter
 }
 
+// AddValuesToContext adds Values to the context so that expression
+// evaluation can use them further down the stack
 func AddValuesToContext(ctx context.Context, vs Values) context.Context {
 	return ctxutil.WithValue(ctx, ValuesContextKey(), vs)
 }
 
+// ValuesFromContextOK attempts to retrieve the values from the context
+// and returns false if the values cannot be found.
 func ValuesFromContextOK(ctx context.Context) (vs Values, ok bool) {
 	vs, ok = ctxutil.Value(ctx, ValuesContextKey()).(Values)
 	return
