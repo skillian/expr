@@ -200,6 +200,21 @@ func makeEEValueKey(typeIndex, valueIndex int) eeValueKey {
 	}
 }
 
+func eeValueKeyFromOpCodes(ops []opCode) (k eeValueKey, n int) {
+	bs := asByteSlice(ops)
+	k.data = *((*uint)(unsafe.Pointer(&bs[0])))
+	return k, int(unsafe.Sizeof(uint(0)))
+}
+
+func (vk eeValueKey) appendToOpCodes(ops []opCode) []opCode {
+	return appendValBitsToBytes(ops, vk.data)
+}
+
+func (vk eeValueKey) typeAndValueIndexes() (typeIndex, valueIndex int) {
+	return int(vk.data) & eeValueKeyTypeMask,
+		int(vk.data>>eeValueKeyTypeBits) & eeValueKeyValIndexMask
+}
+
 func asByteSlice[T ~byte](sl []T) []byte {
 	return *((*[]byte)(unsafe.Pointer(&sl)))
 }
@@ -208,19 +223,11 @@ func fromByteSlice[T ~byte](sl []byte) []T {
 	return *((*[]T)(unsafe.Pointer(&sl)))
 }
 
-func eeValueKeyFromOpCodes(ops []opCode) (k eeValueKey, n int) {
-	bs := asByteSlice(ops)
-	k.data = *((*uint)(unsafe.Pointer(&bs[0])))
-	return k, int(unsafe.Sizeof(uint(0)))
+func appendValBitsToBytes[TByte ~byte, TValue any](bs []TByte, v TValue) []TByte {
+	return appendPtrToValBitsToBytes(bs, &v)
 }
 
-func (vk eeValueKey) appendToOpCodes(ops []opCode) []opCode {
-	bs := asByteSlice(ops)
-	data := (*[int(unsafe.Sizeof(uint(0)))]byte)(unsafe.Pointer(&vk.data))
-	return fromByteSlice[opCode](append(bs, (*data)[:]...))
-}
-
-func (vk eeValueKey) typeAndValueIndexes() (typeIndex, valueIndex int) {
-	return int(vk.data) & eeValueKeyTypeMask,
-		int(vk.data>>eeValueKeyTypeBits) & eeValueKeyValIndexMask
+func appendPtrToValBitsToBytes[TByte ~byte, TValue any](bs []TByte, v *TValue) []TByte {
+	vBytes := unsafe.Slice((*byte)(unsafe.Pointer(v)), unsafe.Sizeof(*v))
+	return fromByteSlice[TByte](append(asByteSlice(bs), vBytes...))
 }

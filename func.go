@@ -217,8 +217,7 @@ func (b *exprFuncBuilder) walk(e Expr) bool {
 		return b.walkVarOrValue(top, e)
 	case opPackTuple:
 		top.codes = append(top.codes, opPackTuple)
-		// TODO: come up with a way to just append integers:
-		top.codes = eeValueKey{data: uint(len(top.opers))}.appendToOpCodes(top.codes)
+		top.codes = appendValBitsToBytes(top.codes, len(top.opers))
 		return true
 	}
 	t, err := b.checkType(op, top)
