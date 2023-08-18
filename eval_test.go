@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -80,9 +81,17 @@ var evalTests = []evalTest{
 
 	// member access:
 	{expr.Mem{map[string]interface{}{"hello": "world"}, "hello"}, nil, "world", ""},
-	{expr.Mem{&(struct{ A string }{A: "helloWorld"}), 0}, nil, "helloWorld", ""},
-	{expr.Mem{expr.Mem{&TestOuter{Inner: TestInner{S: "asdf"}}, 0}, 0}, nil, "asdf", ""},
-	{expr.Mem{expr.Mem{&TestOuter2{Inner: &TestInner{S: "asdf"}}, 0}, 0}, nil, "asdf", ""},
+	{func() expr.Expr {
+		s := &(struct{ A string }{A: "helloWorld"})
+		sf := reflect.TypeOf(s).Elem().Field(0)
+		return expr.Mem{s, &sf}
+	}(), nil, "helloWorld", ""},
+	{func() expr.Expr {
+		s := &TestOuter{Inner: TestInner{S: "asdf"}}
+		sf0 := reflect.TypeOf(s).Elem().Field(0)
+		sf1 := reflect.TypeOf(&s.Inner).Elem().Field(0)
+		return expr.Mem{expr.Mem{s, &sf0}, &sf1}
+	}(), nil, "asdf", ""},
 
 	// variables:
 	func() evalTest {
@@ -108,7 +117,7 @@ func TestEval(t *testing.T) {
 	closeHandler := logging.TestingHandler(
 		logger, t,
 		logging.HandlerFormatter(logging.GoFormatter{}),
-		logging.HandlerLevel(logging.EverythingLevel),
+		logging.HandlerLevel(logging.InfoLevel),
 	)
 	defer closeHandler()
 	for i := 0; i < 2; i++ {

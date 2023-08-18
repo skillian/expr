@@ -51,11 +51,6 @@ func (vs *eeValues) copyTo(k eeValueKey, dest *eeValues) eeValueKey {
 
 func (vs *eeValues) floats() *[]float64 { return (*[]float64)(unsafe.Pointer(&vs.nums)) }
 
-func (vs *eeValues) get(k eeValueKey) interface{} {
-	ti, vi := k.typeAndValueIndexes()
-	return vs.types[ti].get(vs, vi)
-}
-
 // peekType peeks the type at the top of the stack without popping it.
 func (vs *eeValues) peekType() (v eeType) {
 	return vs.types[len(vs.types)-1]

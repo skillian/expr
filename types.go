@@ -88,6 +88,7 @@ func typeOf(v interface{}) eeType {
 // getType is like reflect.TypeOf to get the eeType
 func getType(rt reflect.Type) eeType {
 	initMethods := func(et *eeReflectType) {
+		rt := et.reflectType()
 		numMethods := rt.NumMethod()
 		et.fns = make([]eeReflectFunc, numMethods)
 		// preallocate single slice for all fn parameters:
@@ -123,11 +124,11 @@ func getType(rt reflect.Type) eeType {
 				et.cmpOrd = i + 1
 			case "Add":
 				et.addOrd = i + 1
-			case "Sub":
+			case "Sub", "Subtract":
 				et.subOrd = i + 1
-			case "Mul":
+			case "Mul", "Multiply" /* , "Product" */ :
 				et.mulOrd = i + 1
-			case "Div":
+			case "Div", "Divide", "Quo":
 				et.divOrd = i + 1
 			}
 		}
@@ -241,7 +242,6 @@ var (
 	int64Type     = reflect.TypeOf(int64(0))
 	stringType    = reflect.TypeOf("")
 	mapStrAnyType = reflect.TypeOf(map[string]interface{}(nil))
-	tupleType     = reflect.TypeOf(Tuple(nil))
 
 	defaultTypeInit = func() (ti eeTypeInit) {
 		ti.fn = func() {}
@@ -301,8 +301,8 @@ func (et eeAnyKindType) eq(vs *eeValues) (equal bool) {
 	b := vs.popType().pop(vs)
 	defer func() {
 		if recover() != nil {
-			ad := *((*[2]uintptr)(unsafe.Pointer(&a)))
-			bd := *((*[2]uintptr)(unsafe.Pointer(&b)))
+			ad := *ifacePtrData(unsafe.Pointer(&a))
+			bd := *ifacePtrData(unsafe.Pointer(&b))
 			equal = ad == bd
 		}
 	}()
@@ -433,13 +433,14 @@ func (et *eeReflectType) checkType(e Expr, t2 eeType) (eeType, error) {
 	case Div:
 		return getOrdFn(et, et.divOrd)
 	case Mem:
-		if t2 != eeIntType {
+		sf, ok := e[1].(*reflect.StructField)
+		if !ok {
 			return nil, fmt.Errorf(
 				"%w: Cannot get %[2]v (type: %[2]T) member of %[3]v (type: %[3]T)",
 				ErrInvalidType, e[1], e[0],
 			)
 		}
-		return getType(et.reflectType().Field(e[1].(int)).Type), nil
+		return getType(sf.Type), nil
 	}
 	return et.eeAnyKindType.checkType(e, t2)
 }

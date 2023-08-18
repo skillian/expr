@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"unsafe"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/expr"
@@ -19,14 +18,20 @@ var (
 )
 
 func TestMemOf(t *testing.T) {
-	var temp [8]uint64
+	ctx := ctxutil.Background()
 	type S0 struct {
 		I0 int
 	}
-	s0 := (*S0)(unsafe.Pointer(&temp))
+	s0 := &S0{I0: 123}
+	vs := expr.NewValues(expr.VarValue{dummyVar, s0})
+	ctx = expr.AddValuesToContext(ctx, vs)
 	m := expr.MemOf(dummyVar, s0, &s0.I0)
-	if m[1] != 0 {
-		t.Fatalf("expected member 0 == 0, not %[1]#v (type: %[1]T)", m[1])
+	res, err := expr.Eval(ctx, m, vs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != 123 {
+		t.Fatal("expected", m, "==", 123, "but got:", res)
 	}
 	type S1 struct {
 		I0 int64
@@ -34,14 +39,18 @@ func TestMemOf(t *testing.T) {
 		S0 string
 		S1 string
 	}
-	s1 := (*S1)(unsafe.Pointer(&temp))
-	m = expr.MemOf(dummyVar, s1, &s1.S0)
-	if m[1] != 2 {
-		t.Fatalf("expected member 0 == 2, not %[1]#v (type: %[1]T)", m[1])
+	const helloWorld = "hello, world!"
+	s1 := &S1{S0: helloWorld}
+	if err = vs.Set(ctx, dummyVar, s1); err != nil {
+		t.Fatal(err)
 	}
-	m = expr.MemOf(dummyVar, s1, &s1.S1)
-	if m[1] != 3 {
-		t.Fatalf("expected member 0 == 3, not %[1]#v (type: %[1]T)", m[1])
+	m = expr.MemOf(dummyVar, s1, &s1.S0)
+	res, err = expr.Eval(ctx, m, vs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != helloWorld {
+		t.Fatalf("expected member 0 == 2, not %[1]#v (type: %[1]T)", m[1])
 	}
 }
 

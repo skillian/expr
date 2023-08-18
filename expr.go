@@ -14,7 +14,10 @@ import (
 	"github.com/skillian/logging"
 )
 
-const PkgName = "github.com/skillian/expr"
+const (
+	// PkgName gets this package's name as a string constant
+	PkgName = "github.com/skillian/expr"
+)
 
 var (
 	logger = logging.GetLogger(PkgName)
@@ -22,6 +25,8 @@ var (
 
 // Expr is a basic expression
 type Expr interface{}
+
+var exprType = reflect.TypeOf((*Expr)(nil)).Elem()
 
 // Tuple is a finite ordered sequence of expressions.
 type Tuple []Expr
@@ -193,64 +198,58 @@ func (x Div) appendString(sb *strings.Builder) { appendBinary(sb, "/", x) }
 // Mem selects a member of a source expression.
 type Mem [2]Expr
 
-var mems sync.Map // map[reflect.Type][]uintptr
+var mems sync.Map // map[reflect.Type][]reflect.StructField
 
 func MemOf(e Expr, base, field interface{}) Mem {
 	getPtr := func(v interface{}) (rv reflect.Value, p uintptr) {
 		rv = reflect.ValueOf(v)
 		if !rv.IsValid() {
-			panic("MemOf: base is invalid")
+			panic("MemOf: base or field is invalid")
 		}
 		if rv.Kind() != reflect.Ptr {
 			panic(fmt.Sprintf(
-				"MemOf: base must be pointer to struct, not %T",
+				"MemOf: base and field must be pointer, not %T",
 				base,
 			))
 		}
 		if rv.IsNil() {
-			panic("MemOf: base is nil")
+			panic("MemOf: base or field is nil")
 		}
 		p = rv.Pointer()
 		return
 	}
-	type offsetType struct {
-		offset uintptr
-		rtype  reflect.Type
-	}
-	getOffsets := func(t reflect.Type) *[]offsetType {
+	getStructFields := func(t reflect.Type) *[]reflect.StructField {
 		k := interface{}(t)
 		v, loaded := mems.Load(k)
 		if loaded {
-			return v.(*[]offsetType)
+			return v.(*[]reflect.StructField)
 		}
-		offs := new([]offsetType)
-		*offs = make([]offsetType, 0, t.NumField())
+		offs := new([]reflect.StructField)
+		*offs = make([]reflect.StructField, 0, t.NumField())
 		for i := 0; i < cap(*offs); i++ {
 			f := t.Field(i)
 			if f.Type.Size() == 0 {
 				continue
 			}
-			*offs = append(*offs, offsetType{
-				offset: f.Offset,
-				rtype:  reflect.PtrTo(f.Type),
-			})
+			*offs = append(*offs, f)
 		}
 		v, loaded = mems.LoadOrStore(k, offs)
 		if loaded {
-			return v.(*[]offsetType)
+			return v.(*[]reflect.StructField)
 		}
 		return offs
 	}
 	bv, bp := getPtr(base)
 	fv, fp := getPtr(field)
-	ft := fv.Type()
+	ft := fv.Elem().Type()
 	foff := fp - bp
-	offs := *getOffsets(bv.Type().Elem())
+	structFields := *getStructFields(bv.Type().Elem())
 	// TODO: Maybe binary search would be better, but I'm assuming tiny
 	// numbers of fields for now:
-	for i, ot := range offs {
-		if ot.offset == foff && ot.rtype == ft {
-			return Mem{e, i}
+	for i := range structFields {
+		sf := &structFields[i]
+		if sf.Offset == foff && sf.Type == ft {
+			return Mem{e, sf}
 		}
 	}
 	panic(fmt.Errorf(
@@ -672,6 +671,14 @@ func Rewrite(e Expr, f func(Expr) Expr) Expr {
 	return f(e)
 }
 
+type Visitor interface {
+	Visit(Expr) Visitor
+}
+
+type VisitFunc func(Expr) Visitor
+
+func (f VisitFunc) Visit(e Expr) Visitor { return f(e) }
+
 // Walk the expression tree, calling f(e) with the expression when
 // "entering" the expression and f(nil) when "exiting" an expression.
 //
@@ -686,25 +693,26 @@ func Rewrite(e Expr, f func(Expr) Expr) Expr {
 //
 // Note that WalkOptions such as WalkOperandsBackwards can change the
 // call behavior.
-func Walk(e Expr, f func(Expr) bool, options ...WalkOption) bool {
+func Walk(e Expr, v Visitor, options ...WalkOption) {
 	var cfg walkConfig
 	for _, opt := range options {
 		opt(&cfg)
 	}
-	if !f(e) {
-		return false
+	w := v.Visit(e)
+	if w == nil {
+		return
 	}
 	ops := Operands(e)
 	if cfg.flags&walkBackwards == walkBackwards {
 		for i := len(ops) - 1; i >= 0; i-- {
-			Walk(ops[i], f, options...)
+			Walk(ops[i], w, options...)
 		}
 	} else {
 		for _, op := range ops {
-			Walk(op, f)
+			Walk(op, w)
 		}
 	}
-	return f(nil)
+	w.Visit(nil)
 }
 
 type walkConfig struct {

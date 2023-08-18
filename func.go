@@ -11,7 +11,9 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/skillian/ctxutil"
+	"github.com/skillian/logging"
 )
 
 var (
@@ -69,7 +71,7 @@ func funcFromExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
 	if err := b.initVarTypes(ctx, e, vs); err != nil {
 		return nil, err
 	}
-	_ = Walk(e, b.walk, WalkOperandsBackwards)
+	Walk(e, b, WalkOperandsBackwards)
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -112,6 +114,10 @@ type exprFuncBuilder struct {
 	err        error
 }
 
+var _ interface {
+	Visitor
+} = (*exprFuncBuilder)(nil)
+
 type efbStackFrame struct {
 	e     Expr
 	t     eeType
@@ -140,13 +146,14 @@ func (b *exprFuncBuilder) init(capacity int) {
 // initVarTypes initializes the function builder's mapping of variables to
 // their values' types.
 func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) (walkErr error) {
-	_ = Walk(e, func(e Expr) bool {
+	var vf Visitor
+	vf = VisitFunc(func(e Expr) Visitor {
 		va, ok := e.(Var)
 		if !ok {
-			return true
+			return vf
 		}
 		if _, ok := b.vartypes[va]; ok {
-			return true
+			return vf
 		}
 		v, err := vs.Get(ctx, va)
 		if err != nil {
@@ -156,11 +163,12 @@ func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) (
 					"(type: %[2]T): %[3]w",
 				va, vs, err,
 			)
-			return false
+			return nil
 		}
 		b.vartypes[va] = getVarType(typeOf(v).reflectType()).(*eeVarKindType)
-		return true
+		return vf
 	})
+	Walk(e, vf)
 	return
 }
 
@@ -188,10 +196,10 @@ func (b *exprFuncBuilder) reset() {
 
 // walk is passed into the Walk function in the funcFromExpr func to build up
 // the function op codes and values.
-func (b *exprFuncBuilder) walk(e Expr) bool {
+func (b *exprFuncBuilder) Visit(e Expr) Visitor {
 	if e != nil {
 		b.pushExprFrame(e)
-		return true
+		return b
 	}
 	top := b.peekFrame(0)
 	e = top.e
@@ -209,7 +217,7 @@ func (b *exprFuncBuilder) walk(e Expr) bool {
 		}
 		if err != nil {
 			b.err = err
-			return false
+			return nil
 		}
 	}
 	switch op {
@@ -218,12 +226,12 @@ func (b *exprFuncBuilder) walk(e Expr) bool {
 	case opPackTuple:
 		top.codes = append(top.codes, opPackTuple)
 		top.codes = appendValBitsToBytes(top.codes, len(top.opers))
-		return true
+		return b
 	}
 	t, err := b.checkType(op, top)
 	if err != nil {
 		b.err = err
-		return false
+		return b
 	}
 	top.codes = append(top.codes, op)
 	_, topIsMem := e.(Mem)
@@ -240,12 +248,12 @@ func (b *exprFuncBuilder) walk(e Expr) bool {
 		top.t = t
 	}
 	_ = b.popFrame()
-	return true
+	return b
 }
 
 // walkVarOrValue is delegated to by walk to handle loading a variable
 // or value.
-func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) bool {
+func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) Visitor {
 	findOrCreateValKey := func(b *exprFuncBuilder, e Expr, et eeType) eeValueKey {
 		eq := Expr(Eq{})
 		for _, k := range b.valkeys {
@@ -279,7 +287,7 @@ func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) bool {
 		fr.t = b.vartypes[va].eeType
 	}
 	_ = b.popFrame()
-	return true
+	return b
 }
 
 func (b *exprFuncBuilder) checkType(op opCode, fr *efbStackFrame) (returnType eeType, err error) {
@@ -511,8 +519,8 @@ func (b *exprFuncBuilder) genOp() (opCode, error) {
 		}
 	case Mem:
 		switch {
-		case checkKinds(top, opInt, opAny):
-			return opLdmAnyInt, nil
+		case checkKinds(top, opAny, opAny):
+			return opLdmAnyAny, nil
 		case checkKinds(top, opStr, opAny):
 			return opLdmStrMapAny, nil
 		}
@@ -593,7 +601,13 @@ func (b *exprFuncBuilder) build() (f *opFunc, err error) {
 	if b.err != nil {
 		return nil, b.err
 	}
+	if logger.EffectiveLevel() <= logging.DebugLevel {
+		logger.Debug2("%[1]T(%[1]p): %[2]v", b, spew.Sdump(b))
+	}
 	ops := b.getAllOps()
+	if len(ops) == 0 {
+		return nil, fmt.Errorf("Cannot build empty function")
+	}
 	f = &opFunc{
 		ops: make([]opCode, len(ops)),
 		consts: eeValues{
@@ -755,13 +769,53 @@ func (fc *funcCache) loadOrStore(k funcKey, f Func) (actual Func, loaded bool) {
 }
 
 // funcKey is an array of expr types
-type funcKey string
+type funcKey interface{}
 
 func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
-	return funcKey(buildString(e))
+	var appendExpr func(exprs []Expr, e Expr) (appended []Expr, enter bool)
+	appendExpr = func(exprs []Expr, e Expr) ([]Expr, bool) {
+		switch e := e.(type) {
+		case Unary, Binary, interface{ Operands() []Expr }:
+			return append(exprs, reflect.TypeOf(e)), true
+		}
+		rv := reflect.ValueOf(e)
+		switch rv.Kind() {
+		case reflect.Func:
+			return append(exprs, goFuncData(ifacePtrData(unsafe.Pointer(&e)).Data)), false
+		case reflect.Map:
+			mr := rv.MapRange()
+			for mr.Next() {
+				exprs, _ = appendExpr(exprs, mr.Key().Interface())
+				exprs, _ = appendExpr(exprs, mr.Value().Interface())
+			}
+			return exprs, false
+		case reflect.Slice:
+			length := rv.Len()
+			for i := 0; i < length; i++ {
+				exprs, _ = appendExpr(exprs, rv.Index(i).Interface())
+			}
+			return exprs, false
+		}
+		return append(exprs, e), true
+	}
+	const arbitraryCapacity = 8
+	exprs := make([]Expr, 0, arbitraryCapacity)
+	var f Visitor
+	f = VisitFunc(func(e Expr) Visitor {
+		if e != nil {
+			var enter bool
+			exprs, enter = appendExpr(exprs, e)
+			if !enter {
+				return nil
+			}
+		}
+		return f
+	})
+	Walk(e, f)
+	arrayType := reflect.ArrayOf(len(exprs), exprType)
+	arrayPtr := reflect.NewAt(arrayType, unsafe.Pointer(&exprs[0]))
+	return funcKey(arrayPtr.Elem().Interface())
 }
-
-func (k funcKey) ContextKey() interface{} { return k }
 
 // funcData is the internal element type that a funcCache maps to.
 // In addition to the function implementation, it also contains the

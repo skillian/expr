@@ -16,8 +16,7 @@ import (
 
 // Eval evaluates an expression with the given values for parameters.
 func Eval(ctx context.Context, e Expr, vs Values) (interface{}, error) {
-	// TODO: cache funcFromExpr somewhere in ctx.
-	f, err := funcFromExpr(ctx, e, vs)
+	f, err := FuncOfExpr(ctx, e, vs)
 	if err != nil {
 		return nil, err
 	}
@@ -432,10 +431,17 @@ func (ee *exprEvaluator) eval(ctx context.Context) error {
 			a, _ := ee.popRat(), ee.popType()
 			b := ee.popRat()
 			ee.pushRat((&big.Rat{}).Quo(a, b))
-		case opLdmAnyInt:
-			v, _ := ee.popAny(), ee.popType()
-			i, _ := int(ee.popInt()), ee.popType()
-			v = reflect.ValueOf(v).Elem().Field(i).Addr().Interface()
+		case opLdmAnyAny:
+			v, _, _ := ee.popAny(), ee.popType(), ee.popType()
+			switch m := ee.popAny().(type) {
+			case *reflect.StructField:
+				v = reflect.ValueOf(v).Elem().FieldByIndex(m.Index).Addr().Interface()
+			default:
+				return fmt.Errorf(
+					"%[1]w: Unexpected member: %[2]v (type: %[2]T) of %[3]v (%[3]T)",
+					ErrInvalidType, m, v,
+				)
+			}
 			et := typeOf(v)
 			ee.pushType(et)
 			et.push(&ee.eeValues, v)
@@ -849,9 +855,9 @@ const (
 	// opDivRat (see opDivFloat)
 	opDivRat
 
-	// opLdmAnyInt loads an int member from an any value.  Struct
-	// fields are stored this way.
-	opLdmAnyInt
+	// opLdmAnyAny loads an any member from an any value.
+	// Struct field members are stored as *reflect.StructFields.
+	opLdmAnyAny
 
 	// opLdmStrMapAny loads a value from a map[string]interface{}
 	opLdmStrMapAny

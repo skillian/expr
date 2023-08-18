@@ -23,13 +23,24 @@ func minMax[T numberLike](a, b T) (min, max T) {
 func eq(a, b interface{}) (Eq bool) {
 	defer func() {
 		if recover() != nil {
-			ad := *((*[2]uintptr)(unsafe.Pointer(&a)))
-			bd := *((*[2]uintptr)(unsafe.Pointer(&b)))
+			ad := *ifacePtrData(unsafe.Pointer(&a))
+			bd := *ifacePtrData(unsafe.Pointer(&b))
 			Eq = ad == bd
 		}
 	}()
 	return a == b
 }
+
+type ifaceData struct {
+	Type unsafe.Pointer
+	Data unsafe.Pointer
+}
+
+func ifacePtrData(v unsafe.Pointer) *ifaceData {
+	return (*ifaceData)(v)
+}
+
+type goFuncData unsafe.Pointer
 
 type Tuple2[T0, T1 any] struct {
 	V0 T0
