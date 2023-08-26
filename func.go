@@ -11,9 +11,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/skillian/ctxutil"
-	"github.com/skillian/logging"
 )
 
 var (
@@ -71,9 +69,8 @@ func funcFromExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
 	if err := b.initVarTypes(ctx, e, vs); err != nil {
 		return nil, err
 	}
-	Walk(e, b, WalkOperandsBackwards)
-	if b.err != nil {
-		return nil, b.err
+	if err := Walk(e, b, WalkOperandsBackwards()); err != nil {
+		return nil, err
 	}
 	f, err := b.build()
 	if err != nil {
@@ -111,7 +108,6 @@ type exprFuncBuilder struct {
 	values     eeValues
 	freeFrames []*efbStackFrame
 	ops        []opCode
-	err        error
 }
 
 var _ interface {
@@ -119,10 +115,27 @@ var _ interface {
 } = (*exprFuncBuilder)(nil)
 
 type efbStackFrame struct {
-	e     Expr
-	t     eeType
-	opers []*efbStackFrame
-	codes []opCode
+	e          Expr
+	t          eeType
+	opers      []*efbStackFrame
+	smallOpers [2]*efbStackFrame
+	codes      []opCode
+}
+
+func (ef *efbStackFrame) reset() {
+	ef.e = nil
+	ef.t = nil
+	for i := range ef.opers {
+		ef.opers[i] = nil
+	}
+	ef.smallOpers[0] = nil
+	ef.smallOpers[1] = nil
+	if cap(ef.opers) == 0 {
+		ef.opers = ef.smallOpers[:0]
+	} else {
+		ef.opers = ef.opers[:0]
+	}
+	ef.codes = ef.codes[:0]
 }
 
 func (fr *efbStackFrame) walk(f func(fr *efbStackFrame)) {
@@ -145,42 +158,48 @@ func (b *exprFuncBuilder) init(capacity int) {
 
 // initVarTypes initializes the function builder's mapping of variables to
 // their values' types.
-func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) (walkErr error) {
-	var vf Visitor
-	vf = VisitFunc(func(e Expr) Visitor {
+func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) error {
+	var vi Visitor
+	vi = VisitFunc(func(e Expr) (Visitor, error) {
 		va, ok := e.(Var)
 		if !ok {
-			return vf
+			return vi, nil
 		}
 		if _, ok := b.vartypes[va]; ok {
-			return vf
+			return vi, nil
 		}
 		v, err := vs.Get(ctx, va)
 		if err != nil {
-			walkErr = fmt.Errorf(
+			return nil, fmt.Errorf(
 				"error getting var %[1]v (type: "+
 					"%[1]T) from values %[2]v "+
 					"(type: %[2]T): %[3]w",
 				va, vs, err,
 			)
-			return nil
 		}
 		b.vartypes[va] = getVarType(typeOf(v).reflectType()).(*eeVarKindType)
-		return vf
+		return vi, nil
 	})
-	Walk(e, vf)
-	return
+	return Walk(e, vi)
 }
 
 // reset the function builder before it is put back into the pool.
 func (b *exprFuncBuilder) reset() {
 	b.ee.reset()
-	if len(b.stack[0].opers) == 0 {
-		return
-	}
-	b.putFrame(b.stack[0].opers[0])
-	for i := range b.stack {
-		b.stack[i] = nil
+	if len(b.stack) > 0 {
+		visited := make(map[*efbStackFrame]struct{})
+		for i, ef := range b.stack {
+			ef.walk(func(fr *efbStackFrame) {
+				visited[fr] = struct{}{}
+			})
+			b.stack[i] = nil
+		}
+		for ef := range visited {
+			if ef == nil {
+				continue
+			}
+			b.putFrame(ef)
+		}
 	}
 	b.stack = b.stack[:0]
 	b.stack = append(b.stack, b.getFrame())
@@ -191,47 +210,52 @@ func (b *exprFuncBuilder) reset() {
 	b.valkeys = b.valkeys[:0]
 	b.values.reset()
 	b.ops = b.ops[:0]
-	b.err = nil
 }
 
 // walk is passed into the Walk function in the funcFromExpr func to build up
 // the function op codes and values.
-func (b *exprFuncBuilder) Visit(e Expr) Visitor {
+func (b *exprFuncBuilder) Visit(e Expr) (Visitor, error) {
 	if e != nil {
+		logger.Debug3(
+			"push (len: %d): (%p) %#v",
+			len(b.stack), ifacePtrData(unsafe.Pointer(&e)).Data, e,
+		)
 		b.pushExprFrame(e)
-		return b
+		return b, nil
 	}
-	top := b.peekFrame(0)
+	top := b.popFrame()
 	e = top.e
-	sec := b.peekFrame(1)
+	logger.Debug3(
+		"pop  (len: %d): (%p) %#v",
+		len(b.stack), ifacePtrData(unsafe.Pointer(&e)).Data, e,
+	)
+	sec := b.peekFrame(0)
 	sec.opers = append(sec.opers, top)
-	op, err := b.genOp()
-	{
-		if errors.Is(err, ErrInvalidType) {
-			switch e.(type) {
-			case Eq, Ne, Add, Sub, Mul, Div:
-				if err = b.tryPromoteNumTypes(top); err == nil {
-					op, err = b.genOp()
-				}
+	op, err := b.genOp(top)
+	if errors.Is(err, ErrInvalidType) {
+		switch e.(type) {
+		case Eq, Ne, Gt, Ge, Lt, Le, Add, Sub, Mul, Div:
+			if err = b.tryPromoteNumTypes(top); err == nil {
+				op, err = b.genOp(top)
 			}
 		}
-		if err != nil {
-			b.err = err
-			return nil
-		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	switch op {
 	case opNop:
-		return b.walkVarOrValue(top, e)
+		b.walkVarOrValue(top, e)
+		return b, nil
 	case opPackTuple:
 		top.codes = append(top.codes, opPackTuple)
 		top.codes = appendValBitsToBytes(top.codes, len(top.opers))
-		return b
+		top.t = typeOf(Tuple(nil))
+		return b, nil
 	}
 	t, err := b.checkType(op, top)
 	if err != nil {
-		b.err = err
-		return b
+		return b, err
 	}
 	top.codes = append(top.codes, op)
 	_, topIsMem := e.(Mem)
@@ -247,13 +271,12 @@ func (b *exprFuncBuilder) Visit(e Expr) Visitor {
 	default:
 		top.t = t
 	}
-	_ = b.popFrame()
-	return b
+	return b, nil
 }
 
 // walkVarOrValue is delegated to by walk to handle loading a variable
 // or value.
-func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) Visitor {
+func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) {
 	findOrCreateValKey := func(b *exprFuncBuilder, e Expr, et eeType) eeValueKey {
 		eq := Expr(Eq{})
 		for _, k := range b.valkeys {
@@ -286,8 +309,6 @@ func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) Visitor {
 		fr.codes = append(fr.codes, opLdv)
 		fr.t = b.vartypes[va].eeType
 	}
-	_ = b.popFrame()
-	return b
 }
 
 func (b *exprFuncBuilder) checkType(op opCode, fr *efbStackFrame) (returnType eeType, err error) {
@@ -356,7 +377,7 @@ func (b *exprFuncBuilder) tryPromoteNumTypes(fr *efbStackFrame) error {
 }
 
 // genOp generates an opCode for the current builder frame
-func (b *exprFuncBuilder) genOp() (opCode, error) {
+func (b *exprFuncBuilder) genOp(top *efbStackFrame) (opCode, error) {
 	checkKinds := func(fr *efbStackFrame, kinds ...opKind) bool {
 		if len(kinds) != len(fr.opers) {
 			return false
@@ -368,7 +389,6 @@ func (b *exprFuncBuilder) genOp() (opCode, error) {
 		}
 		return true
 	}
-	top := b.peekFrame(0)
 	switch top.e.(type) {
 	case Tuple:
 		return opPackTuple, nil
@@ -586,27 +606,29 @@ func (b *exprFuncBuilder) getFrame() *efbStackFrame {
 }
 
 func (b *exprFuncBuilder) putFrame(fr *efbStackFrame) {
-	fr.e = nil
-	fr.t = nil
-	for i, op := range fr.opers {
-		b.putFrame(op)
-		fr.opers[i] = nil
+	fr.reset()
+	if Debug {
+		for _, ff := range b.freeFrames {
+			if fr == ff {
+				panic(fmt.Sprintf(
+					"%[1]T(%[1]p) already contains %[2]T(%[2]p)",
+					b, fr,
+				))
+			}
+		}
 	}
-	fr.opers = fr.opers[:0]
-	fr.codes = fr.codes[:0]
 	b.freeFrames = append(b.freeFrames, fr)
 }
 
+var errEmptyFunc = errors.New("cannot build empty function")
+
 func (b *exprFuncBuilder) build() (f *opFunc, err error) {
-	if b.err != nil {
-		return nil, b.err
-	}
-	if logger.EffectiveLevel() <= logging.DebugLevel {
-		logger.Debug2("%[1]T(%[1]p): %[2]v", b, spew.Sdump(b))
-	}
+	// if logger.EffectiveLevel() <= logging.DebugLevel {
+	// 	logger.Debug2("%[1]T(%[1]p): %[2]v", b, spew.Sdump(b))
+	// }
 	ops := b.getAllOps()
 	if len(ops) == 0 {
-		return nil, fmt.Errorf("Cannot build empty function")
+		return nil, errEmptyFunc
 	}
 	f = &opFunc{
 		ops: make([]opCode, len(ops)),
@@ -772,46 +794,50 @@ func (fc *funcCache) loadOrStore(k funcKey, f Func) (actual Func, loaded bool) {
 type funcKey interface{}
 
 func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
-	var appendExpr func(exprs []Expr, e Expr) (appended []Expr, enter bool)
-	appendExpr = func(exprs []Expr, e Expr) ([]Expr, bool) {
-		switch e := e.(type) {
-		case Unary, Binary, interface{ Operands() []Expr }:
-			return append(exprs, reflect.TypeOf(e)), true
-		}
+	var appendExpr func(exprs []Expr, e Expr) []Expr
+	appendExpr = func(exprs []Expr, e Expr) []Expr {
 		rv := reflect.ValueOf(e)
 		switch rv.Kind() {
 		case reflect.Func:
-			return append(exprs, goFuncData(ifacePtrData(unsafe.Pointer(&e)).Data)), false
+			return append(exprs, goFuncData(ifacePtrData(unsafe.Pointer(&e)).Data))
 		case reflect.Map:
 			mr := rv.MapRange()
 			for mr.Next() {
-				exprs, _ = appendExpr(exprs, mr.Key().Interface())
-				exprs, _ = appendExpr(exprs, mr.Value().Interface())
+				exprs = appendExpr(exprs, mr.Key().Interface())
+				exprs = appendExpr(exprs, mr.Value().Interface())
 			}
-			return exprs, false
+			return exprs
 		case reflect.Slice:
 			length := rv.Len()
 			for i := 0; i < length; i++ {
-				exprs, _ = appendExpr(exprs, rv.Index(i).Interface())
+				exprs = appendExpr(exprs, rv.Index(i).Interface())
 			}
-			return exprs, false
+			return exprs
 		}
-		return append(exprs, e), true
+		return append(exprs, e)
 	}
 	const arbitraryCapacity = 8
 	exprs := make([]Expr, 0, arbitraryCapacity)
-	var f Visitor
-	f = VisitFunc(func(e Expr) Visitor {
-		if e != nil {
-			var enter bool
-			exprs, enter = appendExpr(exprs, e)
-			if !enter {
-				return nil
-			}
+	var v Visitor
+	v = VisitFunc(func(e Expr) (Visitor, error) {
+		if e == nil {
+			return nil, nil
 		}
-		return f
+		switch e := e.(type) {
+		case Tuple:
+			exprs = appendExpr(exprs, e)
+		case Unary, Binary, interface{ Operands() []Expr }:
+			e2 := reflect.Zero(reflect.TypeOf(e)).Interface().(Expr)
+			exprs = append(exprs, e2)
+			return v, nil
+		default:
+			exprs = appendExpr(exprs, e)
+		}
+		return nil, nil
 	})
-	Walk(e, f)
+	if err := Walk(e, v); err != nil {
+		panic(err)
+	}
 	arrayType := reflect.ArrayOf(len(exprs), exprType)
 	arrayPtr := reflect.NewAt(arrayType, unsafe.Pointer(&exprs[0]))
 	return funcKey(arrayPtr.Elem().Interface())

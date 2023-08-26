@@ -242,6 +242,7 @@ var (
 	int64Type     = reflect.TypeOf(int64(0))
 	stringType    = reflect.TypeOf("")
 	mapStrAnyType = reflect.TypeOf(map[string]interface{}(nil))
+	tupleType     = reflect.TypeOf(Tuple(nil))
 
 	defaultTypeInit = func() (ti eeTypeInit) {
 		ti.fn = func() {}
@@ -268,6 +269,8 @@ var (
 		keyType: eeStringType.(eeStringKindType[string]),
 	}
 
+	eeTupleType = &eeSliceKindType[Tuple, Expr]{rt: tupleType}
+
 	eeTypes = func() (m sync.Map) {
 		for _, et := range []eeType{
 			eeBoolType,
@@ -278,6 +281,7 @@ var (
 			eeRatType,
 			eeStringType,
 			eeMapStrAnyType,
+			eeTupleType,
 		} {
 			m.Store(et.reflectType(), et)
 		}
@@ -1046,6 +1050,42 @@ func (et *eeMapStrAnyKindType[T]) setMem(vs *eeValues) {
 	k, _ := T(vs.popStr()), vs.popType()
 	v := vs.popType().pop(vs)
 	m[k] = v
+}
+
+type eeSliceKindType[TSlice ~[]TElem, TElem any] struct {
+	eeAnyKindType
+	rt reflect.Type
+	et eeType
+}
+
+var _ interface {
+	eeType
+	eeMemType
+} = (*eeSliceKindType[[]any, any])(nil)
+
+func (et *eeSliceKindType[TSlice, TElem]) checkType(e Expr, t2 eeType) (eeType, error) {
+	switch e.(type) {
+	case Mem:
+		if t2.kind() != opInt {
+			return nil, ErrInvalidType
+		}
+		return et.et, nil
+	}
+	return et.eeAnyKindType.checkType(e, t2)
+}
+
+func (et *eeSliceKindType[TSlice, TElem]) getMem(vs *eeValues) {
+	sl := vs.popType().pop(vs).(TSlice)
+	i, _ := vs.popInt(), vs.popType()
+	et.et.push(vs, sl[i])
+	vs.pushType(et.et)
+}
+
+func (et *eeSliceKindType[TSlice, TElem]) setMem(vs *eeValues) {
+	sl := vs.popType().pop(vs).(TSlice)
+	i, _ := vs.popInt(), vs.popType()
+	v := vs.popType().pop(vs).(TElem)
+	sl[i] = v
 }
 
 func eeCmp(vs *eeValues) int {

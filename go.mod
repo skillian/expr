@@ -13,5 +13,3 @@ require (
 	github.com/skillian/errors v0.0.0-20220412220440-9e3e39f14923
 	github.com/skillian/logging v0.0.0-20220617155357-42fdd303775d
 )
-
-require github.com/davecgh/go-spew v1.1.1 // indirect

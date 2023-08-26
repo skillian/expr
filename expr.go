@@ -17,6 +17,9 @@ import (
 const (
 	// PkgName gets this package's name as a string constant
 	PkgName = "github.com/skillian/expr"
+
+	// Debug is set when expensive assertions should be checked.
+	Debug = true
 )
 
 var (
@@ -672,47 +675,43 @@ func Rewrite(e Expr, f func(Expr) Expr) Expr {
 }
 
 type Visitor interface {
-	Visit(Expr) Visitor
+	Visit(e Expr) (Visitor, error)
 }
 
-type VisitFunc func(Expr) Visitor
+type VisitFunc func(Expr) (Visitor, error)
 
-func (f VisitFunc) Visit(e Expr) Visitor { return f(e) }
+func (f VisitFunc) Visit(e Expr) (Visitor, error) {
+	return f(e)
+}
 
-// Walk the expression tree, calling f(e) with the expression when
-// "entering" the expression and f(nil) when "exiting" an expression.
-//
-// For example, Add{1, 2} would result in the following calls to f:
-//
-//	f(Add{1, 2})
-//	f(1)
-//	f(nil)
-//	f(2)
-//	f(nil)
-//	f(nil)
-//
-// Note that WalkOptions such as WalkOperandsBackwards can change the
-// call behavior.
-func Walk(e Expr, v Visitor, options ...WalkOption) {
+func Walk(e Expr, v Visitor, options ...WalkOption) error {
 	var cfg walkConfig
 	for _, opt := range options {
 		opt(&cfg)
 	}
-	w := v.Visit(e)
+	w, err := v.Visit(e)
+	if err != nil {
+		return err
+	}
 	if w == nil {
-		return
+		return nil
 	}
 	ops := Operands(e)
 	if cfg.flags&walkBackwards == walkBackwards {
 		for i := len(ops) - 1; i >= 0; i-- {
-			Walk(ops[i], w, options...)
+			if err = Walk(ops[i], w, options...); err != nil {
+				return err
+			}
 		}
 	} else {
 		for _, op := range ops {
-			Walk(op, w)
+			if err = Walk(op, w, options...); err != nil {
+				return err
+			}
 		}
 	}
-	w.Visit(nil)
+	_, err = w.Visit(nil)
+	return err
 }
 
 type walkConfig struct {
@@ -731,6 +730,8 @@ type WalkOption func(c *walkConfig)
 // WalkOperandsBackwards walks the operands of the expression backwards
 // which is useful for the internal compilation process which generates
 // virtual machine instructions.
-var WalkOperandsBackwards = WalkOption(func(c *walkConfig) {
-	c.flags |= walkBackwards
-})
+func WalkOperandsBackwards() WalkOption {
+	return func(c *walkConfig) {
+		c.flags |= walkBackwards
+	}
+}

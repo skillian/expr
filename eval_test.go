@@ -116,7 +116,9 @@ func TestEval(t *testing.T) {
 	testCtx := expr.WithFuncCache(context.Background())
 	closeHandler := logging.TestingHandler(
 		logger, t,
-		logging.HandlerFormatter(logging.GoFormatter{}),
+		logging.HandlerFormatter(logging.FormatterFunc(func(e *logging.Event) string {
+			return fmt.Sprintf(e.Msg, e.Args...)
+		})),
 		logging.HandlerLevel(logging.InfoLevel),
 	)
 	defer closeHandler()
