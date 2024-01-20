@@ -17,6 +17,12 @@ type localStreamer struct {
 type localFilterer localStreamer
 
 func NewLocalFilterer(ctx context.Context, sr Streamer, e expr.Expr) (Streamer, error) {
+	if srcFr, ok := sr.(localFilterer); ok {
+		return localFilterer{
+			source: srcFr.source,
+			e:      expr.And{srcFr.e, e},
+		}, nil
+	}
 	return localFilterer{sr, e}, nil
 }
 

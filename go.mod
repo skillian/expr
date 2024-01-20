@@ -1,6 +1,6 @@
 module github.com/skillian/expr
 
-go 1.20
+go 1.18
 
 replace github.com/skillian/errors => ../errors
 

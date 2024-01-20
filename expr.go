@@ -675,21 +675,21 @@ func Rewrite(e Expr, f func(Expr) Expr) Expr {
 }
 
 type Visitor interface {
-	Visit(e Expr) (Visitor, error)
+	Visit(context.Context, Expr) (Visitor, error)
 }
 
-type VisitFunc func(Expr) (Visitor, error)
+type VisitFunc func(context.Context, Expr) (Visitor, error)
 
-func (f VisitFunc) Visit(e Expr) (Visitor, error) {
-	return f(e)
+func (f VisitFunc) Visit(ctx context.Context, e Expr) (Visitor, error) {
+	return f(ctx, e)
 }
 
-func Walk(e Expr, v Visitor, options ...WalkOption) error {
+func Walk(ctx context.Context, e Expr, v Visitor, options ...WalkOption) error {
 	var cfg walkConfig
 	for _, opt := range options {
 		opt(&cfg)
 	}
-	w, err := v.Visit(e)
+	w, err := v.Visit(ctx, e)
 	if err != nil {
 		return err
 	}
@@ -699,18 +699,18 @@ func Walk(e Expr, v Visitor, options ...WalkOption) error {
 	ops := Operands(e)
 	if cfg.flags&walkBackwards == walkBackwards {
 		for i := len(ops) - 1; i >= 0; i-- {
-			if err = Walk(ops[i], w, options...); err != nil {
+			if err = Walk(ctx, ops[i], w, options...); err != nil {
 				return err
 			}
 		}
 	} else {
 		for _, op := range ops {
-			if err = Walk(op, w, options...); err != nil {
+			if err = Walk(ctx, op, w, options...); err != nil {
 				return err
 			}
 		}
 	}
-	_, err = w.Visit(nil)
+	_, err = w.Visit(ctx, nil)
 	return err
 }
 

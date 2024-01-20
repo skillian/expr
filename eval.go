@@ -30,20 +30,21 @@ func Eval(ctx context.Context, e Expr, vs Values) (interface{}, error) {
 // loops so the function can be compiled once and re-executed with
 // different values through each iteration.
 func FuncOfExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
-	if fc, ok := ctxutil.Value(ctx, (*funcCache)(nil)).(*funcCache); ok {
-		fk := makeFuncKey(ctx, e, vs)
-		f, ok := fc.load(fk)
-		if ok {
-			return f, nil
-		}
-		f, err := funcFromExpr(ctx, e, vs)
-		if err != nil {
-			return nil, err
-		}
-		f, _ = fc.loadOrStore(fk, f)
+	fc, ok := ctxutil.Value(ctx, (*funcCache)(nil)).(*funcCache)
+	if !ok {
+		return funcFromExpr(ctx, e, vs)
+	}
+	fk := makeFuncKey(ctx, e, vs)
+	f, ok := fc.load(fk)
+	if ok {
 		return f, nil
 	}
-	return funcFromExpr(ctx, e, vs)
+	f, err := funcFromExpr(ctx, e, vs)
+	if err != nil {
+		return nil, err
+	}
+	f, _ = fc.loadOrStore(fk, f)
+	return f, nil
 }
 
 // WithEvalContext adds an expression evaluator to the context

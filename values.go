@@ -8,7 +8,7 @@ import (
 )
 
 // eeValues is a stack of values that tries to avoid "boxing" values
-// into interface{}s. Ints, floats, and strings are stored directly
+// into anys. Ints, floats, and strings are stored directly
 // into the stack without boxing.
 type eeValues struct {
 	types []eeType

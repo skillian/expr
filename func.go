@@ -69,7 +69,7 @@ func funcFromExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
 	if err := b.initVarTypes(ctx, e, vs); err != nil {
 		return nil, err
 	}
-	if err := Walk(e, b, WalkOperandsBackwards()); err != nil {
+	if err := Walk(ctx, e, b, WalkOperandsBackwards()); err != nil {
 		return nil, err
 	}
 	f, err := b.build()
@@ -160,7 +160,7 @@ func (b *exprFuncBuilder) init(capacity int) {
 // their values' types.
 func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) error {
 	var vi Visitor
-	vi = VisitFunc(func(e Expr) (Visitor, error) {
+	vi = VisitFunc(func(ctx context.Context, e Expr) (Visitor, error) {
 		va, ok := e.(Var)
 		if !ok {
 			return vi, nil
@@ -180,7 +180,7 @@ func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) e
 		b.vartypes[va] = getVarType(typeOf(v).reflectType()).(*eeVarKindType)
 		return vi, nil
 	})
-	return Walk(e, vi)
+	return Walk(ctx, e, vi)
 }
 
 // reset the function builder before it is put back into the pool.
@@ -214,7 +214,7 @@ func (b *exprFuncBuilder) reset() {
 
 // walk is passed into the Walk function in the funcFromExpr func to build up
 // the function op codes and values.
-func (b *exprFuncBuilder) Visit(e Expr) (Visitor, error) {
+func (b *exprFuncBuilder) Visit(ctx context.Context, e Expr) (Visitor, error) {
 	if e != nil {
 		logger.Debug3(
 			"push (len: %d): (%p) %#v",
@@ -737,7 +737,7 @@ var _ interface {
 } = (*opFunc)(nil)
 
 func (f *opFunc) Call(ctx context.Context, vs Values) (interface{}, error) {
-	return WithEvalContext(ctx, any(nil), func(ctx context.Context, _ any) (res interface{}, err error) {
+	return WithEvalContext(ctx, interface{}(nil), func(ctx context.Context, _ interface{}) (res interface{}, err error) {
 		ee := ctxutil.Value(ctx, (*exprEvaluator)(nil).ContextKey()).(*exprEvaluator)
 		return ee.evalFunc(ctx, f, vs)
 	})
@@ -801,6 +801,8 @@ func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
 		case reflect.Func:
 			return append(exprs, goFuncData(ifacePtrData(unsafe.Pointer(&e)).Data))
 		case reflect.Map:
+			// exprs = append(exprs, rv.Type())	// Do we care about the type?
+			exprs = append(exprs, rv.Len())
 			mr := rv.MapRange()
 			for mr.Next() {
 				exprs = appendExpr(exprs, mr.Key().Interface())
@@ -808,7 +810,9 @@ func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
 			}
 			return exprs
 		case reflect.Slice:
+			exprs = append(exprs, rv.Type())
 			length := rv.Len()
+			exprs = append(exprs, length)
 			for i := 0; i < length; i++ {
 				exprs = appendExpr(exprs, rv.Index(i).Interface())
 			}
@@ -819,7 +823,7 @@ func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
 	const arbitraryCapacity = 8
 	exprs := make([]Expr, 0, arbitraryCapacity)
 	var v Visitor
-	v = VisitFunc(func(e Expr) (Visitor, error) {
+	v = VisitFunc(func(ctx context.Context, e Expr) (Visitor, error) {
 		if e == nil {
 			return nil, nil
 		}
@@ -835,7 +839,7 @@ func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
 		}
 		return nil, nil
 	})
-	if err := Walk(e, v); err != nil {
+	if err := Walk(ctx, e, v); err != nil {
 		panic(err)
 	}
 	arrayType := reflect.ArrayOf(len(exprs), exprType)

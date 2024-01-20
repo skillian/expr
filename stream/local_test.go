@@ -61,10 +61,10 @@ func TestStream(t *testing.T) {
 				t, logging.HandlerFormatter(logging.GoFormatter{}),
 			)()
 			ctx := ctxutil.Background()
-			vs := new([]any)
-			*vs = make([]any, 0, 8)
+			vs := new([]interface{})
+			*vs = make([]interface{}, 0, 8)
 			if err := stream.Each(ctx, tc.factory(ctx, t), vs, func(
-				ctx context.Context, _ stream.Stream, vs *[]any, v any,
+				ctx context.Context, _ stream.Stream, vs *[]interface{}, v interface{},
 			) error {
 				*vs = append(*vs, v)
 				return nil

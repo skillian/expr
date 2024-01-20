@@ -140,7 +140,9 @@ func TestEval(t *testing.T) {
 				handleErr(t, err, tc.err)
 				if !eq(res, tc.expect) {
 					t.Fatalf(
-						"expected:\n\t%[1]v (type: %[1]T)\nbut actual value:\n\t%[2]v (type: %[2]T)",
+						"expected:\n\t%[1]v (type: %[1]T)\n"+
+							"but actual value:\n"+
+							"\t%[2]v (type: %[2]T)",
 						tc.expect, res,
 					)
 				}

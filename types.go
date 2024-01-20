@@ -1061,7 +1061,7 @@ type eeSliceKindType[TSlice ~[]TElem, TElem any] struct {
 var _ interface {
 	eeType
 	eeMemType
-} = (*eeSliceKindType[[]any, any])(nil)
+} = (*eeSliceKindType[[]interface{}, any])(nil)
 
 func (et *eeSliceKindType[TSlice, TElem]) checkType(e Expr, t2 eeType) (eeType, error) {
 	switch e.(type) {
