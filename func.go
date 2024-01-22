@@ -1,23 +1,25 @@
 package expr
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/skillian/ctxutil"
-	"github.com/skillian/errutil"
 )
 
 var (
-	ErrInvalidArgc = errors.New("invalid argument count")
+	// ErrBadOp is returned when an invalid bytecode op is
+	// encountered during the execution of a func.
+	//
+	// It indicates a design flaw in the function compiler.
+	ErrBadOp = errors.New("invalid opcode")
 
 	// ErrInvalidType indicates that one or more objects' types are
 	// incompatible with some operation.  This error should usually
@@ -57,10 +59,9 @@ type Func interface {
 
 // funcFromExpr compiles the expression, e, into a function.
 func funcFromExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
-	// Currently, functions are "statically" "compiled" where
-	// specific VM op-codes are generated based on the function's
-	// parameter types (the "static" part) into a sequence of
-	// virtual instructions (the "compiled" part).
+	// Currently, functions are "statically compiled:"  The
+	// operands' types are inspected and type-specific op codes
+	// are generated.
 	bv := exprFuncBuilders.Get()
 	defer exprFuncBuilders.Put(bv)
 	b := bv.(*exprFuncBuilder)
@@ -68,11 +69,27 @@ func funcFromExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
 	if err := b.initVarTypes(ctx, e, vs); err != nil {
 		return nil, err
 	}
-	_ = Walk(e, b.walk, WalkOperandsBackwards)
-	if b.err != nil {
-		return nil, b.err
+	if err := Walk(ctx, e, b, WalkOperandsBackwards()); err != nil {
+		return nil, err
 	}
-	return b.build()
+	f, err := b.build()
+	if err != nil {
+		return nil, err
+	}
+	logger.Debug2("expr: %v, func:\n%v", e, f)
+	return f, nil
+}
+
+func nameOfFunc(f Func) string {
+	switch f := f.(type) {
+	case *opFunc:
+		if f.name != "" {
+			return f.name
+		}
+	case interface{ Name() string }:
+		return f.Name()
+	}
+	return fmt.Sprintf("%[1]T@%[1]p", f)
 }
 
 var exprFuncBuilders = sync.Pool{
@@ -84,20 +101,41 @@ var exprFuncBuilders = sync.Pool{
 }
 
 type exprFuncBuilder struct {
+	ee         *exprEvaluator
 	stack      []*efbStackFrame
-	vartypes   map[Var]eeType
+	vartypes   map[Var]*eeVarKindType
 	valkeys    []eeValueKey
 	values     eeValues
 	freeFrames []*efbStackFrame
 	ops        []opCode
-	err        error
 }
 
+var _ interface {
+	Visitor
+} = (*exprFuncBuilder)(nil)
+
 type efbStackFrame struct {
-	e     Expr
-	t     eeType
-	opers []*efbStackFrame
-	codes []opCode
+	e          Expr
+	t          eeType
+	opers      []*efbStackFrame
+	smallOpers [2]*efbStackFrame
+	codes      []opCode
+}
+
+func (ef *efbStackFrame) reset() {
+	ef.e = nil
+	ef.t = nil
+	for i := range ef.opers {
+		ef.opers[i] = nil
+	}
+	ef.smallOpers[0] = nil
+	ef.smallOpers[1] = nil
+	if cap(ef.opers) == 0 {
+		ef.opers = ef.smallOpers[:0]
+	} else {
+		ef.opers = ef.opers[:0]
+	}
+	ef.codes = ef.codes[:0]
 }
 
 func (fr *efbStackFrame) walk(f func(fr *efbStackFrame)) {
@@ -109,9 +147,10 @@ func (fr *efbStackFrame) walk(f func(fr *efbStackFrame)) {
 }
 
 func (b *exprFuncBuilder) init(capacity int) {
+	b.ee = exprEvaluators.Get().(*exprEvaluator)
 	b.stack = make([]*efbStackFrame, 0, capacity)
 	b.stack = append(b.stack, b.getFrame())
-	b.vartypes = make(map[Var]eeType, capacity)
+	b.vartypes = make(map[Var]*eeVarKindType, capacity)
 	b.valkeys = make([]eeValueKey, 0, capacity)
 	b.values.init(capacity)
 	b.ops = make([]opCode, 0, capacity)
@@ -119,39 +158,48 @@ func (b *exprFuncBuilder) init(capacity int) {
 
 // initVarTypes initializes the function builder's mapping of variables to
 // their values' types.
-func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) (err error) {
-	_ = Walk(e, func(e Expr) bool {
+func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) error {
+	var vi Visitor
+	vi = VisitFunc(func(ctx context.Context, e Expr) (Visitor, error) {
 		va, ok := e.(Var)
 		if !ok {
-			return true
+			return vi, nil
 		}
 		if _, ok := b.vartypes[va]; ok {
-			return true
+			return vi, nil
 		}
-		v, walkErr := vs.Get(ctx, va)
-		if walkErr != nil {
-			err = fmt.Errorf(
+		v, err := vs.Get(ctx, va)
+		if err != nil {
+			return nil, fmt.Errorf(
 				"error getting var %[1]v (type: "+
 					"%[1]T) from values %[2]v "+
 					"(type: %[2]T): %[3]w",
-				va, vs, walkErr,
+				va, vs, err,
 			)
-			return false
 		}
-		b.vartypes[va] = eeTypeOf(v)
-		return true
+		b.vartypes[va] = getVarType(typeOf(v).reflectType()).(*eeVarKindType)
+		return vi, nil
 	})
-	return
+	return Walk(ctx, e, vi)
 }
 
 // reset the function builder before it is put back into the pool.
 func (b *exprFuncBuilder) reset() {
-	if len(b.stack[0].opers) == 0 {
-		return
-	}
-	b.putFrame(b.stack[0].opers[0])
-	for i := range b.stack {
-		b.stack[i] = nil
+	b.ee.reset()
+	if len(b.stack) > 0 {
+		visited := make(map[*efbStackFrame]struct{})
+		for i, ef := range b.stack {
+			ef.walk(func(fr *efbStackFrame) {
+				visited[fr] = struct{}{}
+			})
+			b.stack[i] = nil
+		}
+		for ef := range visited {
+			if ef == nil {
+				continue
+			}
+			b.putFrame(ef)
+		}
 	}
 	b.stack = b.stack[:0]
 	b.stack = append(b.stack, b.getFrame())
@@ -162,234 +210,348 @@ func (b *exprFuncBuilder) reset() {
 	b.valkeys = b.valkeys[:0]
 	b.values.reset()
 	b.ops = b.ops[:0]
-	b.err = nil
 }
 
 // walk is passed into the Walk function in the funcFromExpr func to build up
 // the function op codes and values.
-func (b *exprFuncBuilder) walk(e Expr) bool {
+func (b *exprFuncBuilder) Visit(ctx context.Context, e Expr) (Visitor, error) {
 	if e != nil {
+		logger.Debug3(
+			"push (len: %d): (%p) %#v",
+			len(b.stack), ifacePtrData(unsafe.Pointer(&e)).Data, e,
+		)
 		b.pushExprFrame(e)
-		return true
+		return b, nil
 	}
-	top := b.peekFrame(0)
+	top := b.popFrame()
 	e = top.e
-	sec := b.peekFrame(1)
+	logger.Debug3(
+		"pop  (len: %d): (%p) %#v",
+		len(b.stack), ifacePtrData(unsafe.Pointer(&e)).Data, e,
+	)
+	sec := b.peekFrame(0)
 	sec.opers = append(sec.opers, top)
-	op := b.genOp()
-	switch op {
-	case opNop:
-		return b.walkVarOrValue(top, e)
-	case opPackSlice:
-		return b.walkTuple(top, e)
-	}
-	t, err := b.checkType(op, top)
+	op, err := b.genOp(top)
 	if errors.Is(err, ErrInvalidType) {
-		if len(top.opers) == 2 {
-			if left, ok := top.opers[1].t.(eeNumType); ok {
-				if right, ok := top.opers[0].t.(eeNumType); ok {
-					t, err = b.tryPromoteNumTypes(top, left, right)
-				}
+		switch e.(type) {
+		case Eq, Ne, Gt, Ge, Lt, Le, Add, Sub, Mul, Div:
+			if err = b.tryPromoteNumTypes(top); err == nil {
+				op, err = b.genOp(top)
 			}
 		}
 	}
 	if err != nil {
-		b.err = err
-		return false
+		return nil, err
+	}
+	switch op {
+	case opNop:
+		b.walkVarOrValue(top, e)
+		return b, nil
+	case opPackTuple:
+		top.codes = append(top.codes, opPackTuple)
+		top.codes = opCodesFromBytes(appendValBitsToBytes(opCodesBytes(top.codes), len(top.opers)))
+		top.t = typeOf(Tuple(nil))
+		return b, nil
+	}
+	t, err := b.checkType(op, top)
+	if err != nil {
+		return b, err
 	}
 	top.codes = append(top.codes, op)
-	top.t = t
-	_ = b.popFrame()
-	return true
+	_, topIsMem := e.(Mem)
+	isMapMem := topIsMem && top.opers[1].t.reflectType().Kind() == reflect.Map
+	_, secIsMem := sec.e.(Mem)
+	switch {
+	case topIsMem && secIsMem && t.reflectType().Kind() != reflect.Ptr:
+		top.t = getType(reflect.PtrTo(t.reflectType()))
+	case topIsMem && !isMapMem:
+		// TODO: deref something other than Any?
+		top.codes = append(top.codes, opDerefAny)
+		fallthrough
+	default:
+		top.t = t
+	}
+	return b, nil
 }
 
 // walkVarOrValue is delegated to by walk to handle loading a variable
 // or value.
-func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) bool {
-	isVar, t := b.varOrValueType(e)
-	index := -1
-	for i, k := range b.valkeys {
-		vt := b.values.types[k.typeIndex]
-		if t != vt {
-			continue
+func (b *exprFuncBuilder) walkVarOrValue(fr *efbStackFrame, e Expr) {
+	findOrCreateValKey := func(b *exprFuncBuilder, e Expr, et eeType) eeValueKey {
+		eq := Expr(Eq{})
+		for _, k := range b.valkeys {
+			ti, _ := k.typeAndValueIndexes()
+			vt := b.values.types[ti]
+			_, err := vt.checkType(eq, et)
+			if err != nil {
+				continue
+			}
+			b.values.copyTo(k, &b.ee.eeValues)
+			b.ee.eeValues.pushType(et)
+			et.push(&b.ee.eeValues, e)
+			if !et.eq(&b.ee.eeValues) {
+				continue
+			}
+			return k
 		}
-		v := vt.get(&b.values, k.valIndex)
-		if v != e {
-			continue
-		}
-		index = i
-		break
+		b.valkeys = append(b.valkeys, makeEEValueKey(
+			b.values.pushType(et),
+			et.push(&b.values, e),
+		))
+		return b.valkeys[len(b.valkeys)-1]
 	}
-	if index == -1 {
-		index = len(b.valkeys)
-		vt := t
-		if isVar {
-			vt = varType
-		}
-		b.valkeys = append(
-			b.valkeys,
-			b.values.append(e, vt),
-		)
-	}
-	if isVar {
-		fr.codes = append(fr.codes, opLdv)
-	} else {
-		fr.codes = append(fr.codes, opLdc)
-	}
-	appendIntToOpCodesInto(&fr.codes, int64(index))
-	fr.t = t
-	_ = b.popFrame()
-	return true
-}
-
-var (
-	reflectEmptyInterfaceType             = reflect.TypeOf((*interface{})(nil)).Elem()
-	emptyEmptyInterfaceSlice  interface{} = ([]interface{})(nil)
-)
-
-func (b *exprFuncBuilder) walkTuple(fr *efbStackFrame, e Expr) bool {
-	// if all elements are the same eeType, create a slice of that.
-	// else, []interface{}
-	if len(fr.opers) == 0 {
-		return b.walkVarOrValue(fr, emptyEmptyInterfaceSlice)
-	}
-	et := fr.opers[0].t
-	for _, oper := range fr.opers[1:] {
-		if et != oper.t {
-			et = eeTypeFromReflectType(reflectEmptyInterfaceType)
-			break
-		}
-	}
-	i := b.getTypeIndex(et)
-	fr.codes = append(fr.codes, opPackSlice)
-	appendIntToOpCodesInto(&fr.codes, int64(i))
-	appendIntToOpCodesInto(&fr.codes, int64(len(fr.opers)))
-	fr.t = tupleType
-	_ = b.popFrame()
-	return true
-}
-
-// varOrValueType gets a variable or value's type.  If e is a variable,
-// the type of the variable's value is returned.
-func (b *exprFuncBuilder) varOrValueType(e Expr) (isVar bool, t eeType) {
+	et := typeOf(e)
+	vk := findOrCreateValKey(b, e, et)
+	fr.codes = append(fr.codes, opLdc)
+	fr.codes = vk.appendToOpCodes(fr.codes)
+	fr.t = et
 	if va, ok := e.(Var); ok {
-		t, ok := b.vartypes[va]
-		if !ok {
-			panic(fmt.Errorf(
-				"all vars should be accounted for "+
-					"before %T.%v is called",
-				b, errutil.Caller(1).FuncName,
-			))
-		}
-		return true, t
+		fr.codes = append(fr.codes, opLdv)
+		fr.t = b.vartypes[va].eeType
 	}
-	return false, eeTypeOf(e)
 }
 
 func (b *exprFuncBuilder) checkType(op opCode, fr *efbStackFrame) (returnType eeType, err error) {
+	if len(fr.opers) < 1 {
+		return nil, fmt.Errorf("cannot check type without an operand")
+	}
+	if len(fr.opers) > 2 {
+		return nil, fmt.Errorf(
+			"cannot check type of %d-ary operation",
+			len(fr.opers),
+		)
+	}
 	t := fr.opers[len(fr.opers)-1].t
 	errFmt := "%[1]w: %[2]v %#[3]v"
 	var t2 eeType
-	if op.arity() == 2 {
+	if len(fr.opers) > 1 {
 		t2 = fr.opers[len(fr.opers)-2].t
 		errFmt = "%[1]w: %#[3]v %[2]v %#[4]v"
 	}
-	returnType, err = t.typeCheck(fr.e, t2)
+	returnType, err = t.checkType(fr.e, t2)
 	if err != nil {
 		err = fmt.Errorf(errFmt, err, op, t, t2)
 	}
 	return
 }
 
-func (b *exprFuncBuilder) tryPromoteNumTypes(fr *efbStackFrame, leftNt, rightNt eeNumType) (returnType eeType, err error) {
-	left, right := fr.opers[1], fr.opers[0] // backwards on purpose
-	numTypeIndex := func(nt eeNumType) int {
-		for i, t := range numTypePromotions {
-			if t == nt {
-				return i
+var numTypePromotions = []struct {
+	src  eeType
+	dest eeType
+	op   opCode
+}{
+	{eeIntType, eeFloat64Type, opConvInt64ToFloat64},
+	{eeIntType, eeRatType, opConvInt64ToRat},
+	{eeInt64Type, eeFloat64Type, opConvInt64ToFloat64},
+	{eeInt64Type, eeRatType, opConvInt64ToRat},
+	{eeFloat64Type, eeRatType, opConvFloat64ToRat},
+}
+
+func (b *exprFuncBuilder) tryPromoteNumTypes(fr *efbStackFrame) error {
+	getPromote := func(a, b eeType) (t eeType, op opCode) {
+		for _, p := range numTypePromotions {
+			if p.src == a && p.dest == b {
+				return p.dest, p.op
 			}
 		}
-		panic(fmt.Errorf(
-			"unknown number type for numeric "+
-				"promotion: %[1]v (type: %[1]T)", nt,
-		))
+		return nil, opNop
 	}
-	leftNti := numTypeIndex(leftNt)
-	rightNti := numTypeIndex(rightNt)
-	promoteFr, _, _, nti := minMaxBy(left, leftNti, right, rightNti)
-	target := numTypePromotions[nti].(eeType)
-	promoteFr.codes = append(promoteFr.codes, opConv2)
-	appendIntToOpCodesInto(
-		&promoteFr.codes,
-		int64(getIndexOrAppendInto(
-			&b.values.types,
-			target,
-		)),
-	)
-	appendIntToOpCodesInto(
-		&promoteFr.codes,
-		int64(getIndexOrAppendInto(
-			&b.values.anys,
-			interface{}(eeNumConvType{}),
-		)),
-	)
-	return target, nil
+	left, right := fr.opers[1], fr.opers[0] // backwards on purpose
+	et, op := getPromote(left.t, right.t)
+	operIndex := 1
+	if op == opNop {
+		et, op = getPromote(right.t, left.t)
+		operIndex = 0
+	}
+	if op == opNop {
+		return fmt.Errorf(
+			"%w: Cannot promote %v to %v or vice-versa",
+			ErrInvalidType, reflectTypeName(left.t.reflectType()),
+			reflectTypeName(right.t.reflectType()),
+		)
+	}
+	promoteFrame := fr.opers[operIndex]
+	promoteFrame.codes = append(promoteFrame.codes, op)
+	promoteFrame.t = et
+	return nil
 }
 
 // genOp generates an opCode for the current builder frame
-func (b *exprFuncBuilder) genOp() opCode {
-	top := b.peekFrame(0)
+func (b *exprFuncBuilder) genOp(top *efbStackFrame) (opCode, error) {
+	checkKinds := func(fr *efbStackFrame, kinds ...opKind) bool {
+		if len(kinds) != len(fr.opers) {
+			return false
+		}
+		for i, k := range kinds {
+			if k != fr.opers[i].t.kind() {
+				return false
+			}
+		}
+		return true
+	}
 	switch top.e.(type) {
-	case Not:
-		return opNot
-	case And:
-		return opAnd
-	case Or:
-		return opOr
-	case Eq:
-		return opEq
-	case Ne:
-		return opNe
-	case Gt:
-		return opGt
-	case Ge:
-		return opGe
-	case Lt:
-		return opLt
-	case Le:
-		return opLe
-	case Add:
-		return opAdd
-	case Sub:
-		return opSub
-	case Mul:
-		return opMul
-	case Div:
-		return opDiv
-	case Mem:
-		if _, ok := top.opers[1].t.(eeMapType); ok {
-			return opLdk
-		}
-		if _, ok := b.peekFrame(1).e.(Mem); ok {
-			return opLdma
-		}
-		return opLdm
 	case Tuple:
-		return opPackSlice
+		return opPackTuple, nil
+	case Not:
+		switch {
+		case checkKinds(top, opBool):
+			return opNotBool, nil
+		case checkKinds(top, opInt):
+			return opNotInt, nil
+		}
+	case And:
+		switch {
+		case checkKinds(top, opBool, opBool):
+			return opAndBool, nil
+		case checkKinds(top, opInt, opInt):
+			return opAndInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opAndRat, nil
+		}
+	case Or:
+		switch {
+		case checkKinds(top, opBool, opBool):
+			return opOrBool, nil
+		case checkKinds(top, opInt, opInt):
+			return opOrInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opOrRat, nil
+		}
+	case Eq:
+		switch {
+		case checkKinds(top, opAny, opAny):
+			return opEqAny, nil
+		case checkKinds(top, opBool, opBool):
+			return opEqBool, nil
+		case checkKinds(top, opFloat, opFloat):
+			return opEqFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opEqInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opEqRat, nil
+		case checkKinds(top, opStr, opStr):
+			return opEqStr, nil
+		}
+	case Ne:
+		switch {
+		case checkKinds(top, opAny, opAny):
+			return opNeAny, nil
+		case checkKinds(top, opBool, opBool):
+			return opNeBool, nil
+		case checkKinds(top, opFloat, opFloat):
+			return opNeFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opNeInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opNeRat, nil
+		case checkKinds(top, opStr, opStr):
+			return opNeStr, nil
+		}
+	case Gt:
+		switch {
+		case checkKinds(top, opAny, opAny):
+			return opGtAny, nil
+		case checkKinds(top, opFloat, opFloat):
+			return opGtFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opGtInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opGtRat, nil
+		case checkKinds(top, opStr, opStr):
+			return opGtStr, nil
+		}
+	case Ge:
+		switch {
+		case checkKinds(top, opAny, opAny):
+			return opGeAny, nil
+		case checkKinds(top, opFloat, opFloat):
+			return opGeFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opGeInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opGeRat, nil
+		case checkKinds(top, opStr, opStr):
+			return opGeStr, nil
+		}
+	case Lt:
+		switch {
+		case checkKinds(top, opAny, opAny):
+			return opLtAny, nil
+		case checkKinds(top, opFloat, opFloat):
+			return opLtFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opLtInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opLtRat, nil
+		case checkKinds(top, opStr, opStr):
+			return opLtStr, nil
+		}
+	case Le:
+		switch {
+		case checkKinds(top, opAny, opAny):
+			return opLeAny, nil
+		case checkKinds(top, opFloat, opFloat):
+			return opLeFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opLeInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opLeRat, nil
+		case checkKinds(top, opStr, opStr):
+			return opLeStr, nil
+		}
+	case Add:
+		switch {
+		case checkKinds(top, opFloat, opFloat):
+			return opAddFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opAddInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opAddRat, nil
+		case checkKinds(top, opStr, opStr):
+			return opAddStr, nil
+		}
+	case Sub:
+		switch {
+		case checkKinds(top, opFloat, opFloat):
+			return opSubFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opSubInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opSubRat, nil
+		}
+	case Mul:
+		switch {
+		case checkKinds(top, opFloat, opFloat):
+			return opMulFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opMulInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opMulRat, nil
+		}
+	case Div:
+		switch {
+		case checkKinds(top, opFloat, opFloat):
+			return opDivFloat, nil
+		case checkKinds(top, opInt, opInt):
+			return opDivInt, nil
+		case checkKinds(top, opRat, opRat):
+			return opDivRat, nil
+		}
+	case Mem:
+		switch {
+		case checkKinds(top, opAny, opAny):
+			return opLdmAnyAny, nil
+		case checkKinds(top, opStr, opAny):
+			return opLdmStrMapAny, nil
+		}
 	default:
 		// will turn into some sort of load value
-		return opNop
+		return opNop, nil
 	}
-}
-
-func (b *exprFuncBuilder) getTypeIndex(t eeType) int {
-	for i, t2 := range b.values.types {
-		if t == t2 {
-			return i
-		}
-	}
-	b.values.types = append(b.values.types, t)
-	return len(b.values.types) - 1
+	return 0, fmt.Errorf(
+		"%w: Cannot determine op code for: %v",
+		ErrInvalidType, top.e,
+	)
 }
 
 // peekFrame peeks at the i'th frame from the top of the stack (0 for
@@ -444,34 +606,40 @@ func (b *exprFuncBuilder) getFrame() *efbStackFrame {
 }
 
 func (b *exprFuncBuilder) putFrame(fr *efbStackFrame) {
-	fr.e = nil
-	fr.t = nil
-	for i, op := range fr.opers {
-		b.putFrame(op)
-		fr.opers[i] = nil
+	fr.reset()
+	if Debug {
+		for _, ff := range b.freeFrames {
+			if fr == ff {
+				panic(fmt.Sprintf(
+					"%[1]T(%[1]p) already contains %[2]T(%[2]p)",
+					b, fr,
+				))
+			}
+		}
 	}
-	fr.opers = fr.opers[:0]
-	fr.codes = fr.codes[:0]
 	b.freeFrames = append(b.freeFrames, fr)
 }
 
+var errEmptyFunc = errors.New("cannot build empty function")
+
 func (b *exprFuncBuilder) build() (f *opFunc, err error) {
-	if b.err != nil {
-		return nil, b.err
-	}
+	// if logger.EffectiveLevel() <= logging.DebugLevel {
+	// 	logger.Debug2("%[1]T(%[1]p): %[2]v", b, spew.Sdump(b))
+	// }
 	ops := b.getAllOps()
+	if len(ops) == 0 {
+		return nil, errEmptyFunc
+	}
 	f = &opFunc{
-		ops:       make([]opCode, len(ops)),
-		constkeys: make([]eeValueKey, len(b.valkeys)),
+		ops: make([]opCode, len(ops)),
 		consts: eeValues{
 			types: make([]eeType, len(b.values.types)),
-			nums:  make([]eeNum, len(b.values.nums)),
+			nums:  make([]int64, len(b.values.nums)),
 			strs:  make([]string, len(b.values.strs)),
 			anys:  make([]interface{}, len(b.values.anys)),
 		},
 	}
 	copy(f.ops, ops)
-	copy(f.constkeys, b.valkeys)
 	copy(f.consts.types, b.values.types)
 	copy(f.consts.nums, b.values.nums)
 	copy(f.consts.strs, b.values.strs)
@@ -480,8 +648,14 @@ func (b *exprFuncBuilder) build() (f *opFunc, err error) {
 }
 
 func (b *exprFuncBuilder) getAllOps() []opCode {
-	ops := make([]opCode, 0, 64)
-	var lastOps []opCode
+	opsCap := 0
+	b.stack[0].walk(func(fr *efbStackFrame) {
+		if fr == nil {
+			return
+		}
+		opsCap += len(fr.codes)
+	})
+	ops := make([]opCode, 0, opsCap)
 	stack := make([]*efbStackFrame, 0, 8)
 	b.stack[0].walk(func(fr *efbStackFrame) {
 		if fr != nil {
@@ -490,15 +664,7 @@ func (b *exprFuncBuilder) getAllOps() []opCode {
 		}
 		fr = stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if bytes.Equal(
-			asByteSlice(lastOps),
-			asByteSlice(fr.codes),
-		) {
-			ops = append(ops, opDup)
-		} else {
-			ops = append(ops, fr.codes...)
-			lastOps = fr.codes
-		}
+		ops = append(ops, fr.codes...)
 	})
 	return ops
 }
@@ -513,13 +679,13 @@ type opFunc struct {
 	// virtual machine carries out to execute the function.
 	ops []opCode
 
-	// constKeys are indexes into the `consts` from which constant
-	// values are retrieved during the execution of this function.
-	constkeys []eeValueKey
-
 	// consts are a collection of constant values bound to and
 	// referenced by this function.
 	consts eeValues
+
+	// name is an optional name that can be provided for the
+	// function.  This can be helpful for diagnostics information.
+	name string
 }
 
 // opDasmAppendTo disassembles a function into a string builder.
@@ -528,55 +694,29 @@ type opFunc struct {
 // An optional `indent` prefix can be inserted, for example, if this
 // function is being called from another function to format a function.
 func (f *opFunc) opDasmAppendTo(sb *strings.Builder, pc int, indent string) error {
-	funcOpArgString := func(f *opFunc, op opCode, i int, arg int64) string {
-		switch op {
-		case opLdc:
-			ck := f.constkeys[int(arg)]
-			v := f.consts.types[ck.typeIndex].get(&f.consts, ck.valIndex)
-			return fmt.Sprintf("%[1]v (type: %[1]T)", v)
-		case opPackSlice:
-			if i == 1 {
-				return "" // fine as just numeric value.
-			}
-			fallthrough // else, it's 0: the type param:
-		case opConv1, opConv2:
-			t := f.consts.types[int(arg)]
-			return fmt.Sprintf("%[1]v (metatype: %[1]T)", t)
-		}
-		panic(fmt.Errorf("unexpected op: %v", op))
-	}
-	var indexCache [2]int64
-	for i := 0; i < len(f.ops); i++ {
+	for i := 0; i < len(f.ops); {
 		op := f.ops[i]
-		indexes := indexCache[:op.nargs()]
-		for j := range indexes {
-			i64, n := getIntFromOpCodes(f.ops[i+1:])
-			i += n
-			indexes[j] = i64
-		}
 		sb.WriteString(indent)
 		sb.WriteString(strconv.Itoa(i))
+		opLength := op.length()
+		i += opLength
 		sb.WriteByte('\t')
 		if i == pc {
 			sb.WriteString("->")
 		}
 		sb.WriteByte('\t')
 		sb.WriteString(op.String())
-		if len(indexes) > 0 {
-			sb.WriteByte('\t')
-			for j, x := range indexes {
-				if j > 0 {
-					sb.WriteString(", ")
-				}
-				sb.WriteString(strconv.FormatInt(x, 16))
-				sb.WriteString(" (")
-				sb.WriteString(strconv.FormatInt(x, 10))
-				if s := funcOpArgString(f, op, j, x); s != "" {
-					sb.WriteString(": ")
-					sb.WriteString(s)
-				}
-				sb.WriteByte(')')
-			}
+		switch op {
+		case opLdc:
+			sb.WriteByte(' ')
+			vk := *((*eeValueKey)(unsafe.Pointer(&f.ops[i-(opLength-1)])))
+			ti, vi := vk.typeAndValueIndexes()
+			v := f.consts.types[ti].get(&f.consts, vi)
+			sb.WriteString(fmt.Sprintf("%#[1]v", v))
+		case opBrt:
+			sb.WriteByte(' ')
+			i := *((*int)(unsafe.Pointer(&f.ops[i-(opLength-1)])))
+			sb.WriteString(strconv.Itoa(i))
 		}
 		sb.WriteByte('\n')
 	}
@@ -597,13 +737,16 @@ var _ interface {
 } = (*opFunc)(nil)
 
 func (f *opFunc) Call(ctx context.Context, vs Values) (res interface{}, err error) {
-	err = WithEvalContext(ctx, &res, func(ctx context.Context, pres *any) error {
-		ee := ctxutil.Value(ctx, (*exprEvaluator)(nil).ContextKey()).(*exprEvaluator)
-		if err := ee.evalFunc(ctx, f, vs); err != nil {
-			return err
-		}
-		*pres = ee.stack.popType().pop(&ee.stack)
-		return nil
+	type callStateType struct {
+		res *interface{}
+	}
+	err = WithEvalContext(ctx, callStateType{&res}, func(
+		ctx context.Context, state interface{},
+	) (err error) {
+		p := state.(callStateType).res
+		ee := ctxutil.Value(ctx, exprEvaluatorContextKey()).(*exprEvaluator)
+		*p, err = ee.evalFunc(ctx, f, vs)
+		return
 	})
 	return
 }
@@ -655,19 +798,62 @@ func (fc *funcCache) loadOrStore(k funcKey, f Func) (actual Func, loaded bool) {
 	return fd.fn, true
 }
 
-// funcKey combines an expression's parameter types and the expression
-// as a string to create a value that can be used as a key to the
-// funcCache to attempt to load an existing function implementation.
-type funcKey string
+// funcKey is an array of expr types
+type funcKey interface{}
 
 func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
-	var sb strings.Builder
-	appendString(&sb, makeFuncTypeSigKeyFromValues(ctx, vs))
-	appendString(&sb, e)
-	return funcKey(sb.String())
+	var appendExpr func(exprs []Expr, e Expr) []Expr
+	appendExpr = func(exprs []Expr, e Expr) []Expr {
+		rv := reflect.ValueOf(e)
+		switch rv.Kind() {
+		case reflect.Func:
+			return append(exprs, goFuncData(ifacePtrData(unsafe.Pointer(&e)).Data))
+		case reflect.Map:
+			// exprs = append(exprs, rv.Type())	// Do we care about the type?
+			exprs = append(exprs, rv.Len())
+			mr := rv.MapRange()
+			for mr.Next() {
+				exprs = appendExpr(exprs, mr.Key().Interface())
+				exprs = appendExpr(exprs, mr.Value().Interface())
+			}
+			return exprs
+		case reflect.Slice:
+			exprs = append(exprs, rv.Type())
+			length := rv.Len()
+			exprs = append(exprs, length)
+			for i := 0; i < length; i++ {
+				exprs = appendExpr(exprs, rv.Index(i).Interface())
+			}
+			return exprs
+		}
+		return append(exprs, e)
+	}
+	const arbitraryCapacity = 8
+	exprs := make([]Expr, 0, arbitraryCapacity)
+	var v Visitor
+	v = VisitFunc(func(ctx context.Context, e Expr) (Visitor, error) {
+		if e == nil {
+			return nil, nil
+		}
+		switch e := e.(type) {
+		case Tuple:
+			exprs = appendExpr(exprs, e)
+		case Unary, Binary, interface{ Operands() []Expr }:
+			e2 := reflect.Zero(reflect.TypeOf(e)).Interface().(Expr)
+			exprs = append(exprs, e2)
+			return v, nil
+		default:
+			exprs = appendExpr(exprs, e)
+		}
+		return nil, nil
+	})
+	if err := Walk(ctx, e, v); err != nil {
+		panic(err)
+	}
+	arrayType := reflect.ArrayOf(len(exprs), exprType)
+	arrayPtr := reflect.NewAt(arrayType, unsafe.Pointer(&exprs[0]))
+	return funcKey(arrayPtr.Elem().Interface())
 }
-
-func (k funcKey) ContextKey() interface{} { return k }
 
 // funcData is the internal element type that a funcCache maps to.
 // In addition to the function implementation, it also contains the
@@ -677,95 +863,4 @@ func (k funcKey) ContextKey() interface{} { return k }
 type funcData struct {
 	fn    Func
 	count uint64
-}
-
-type funcTypeSigKey string
-
-const (
-	funcTypeSigBool     = 'b'
-	funcTypeSigInt      = 'i'
-	funcTypeSigInt8     = 'o'
-	funcTypeSigInt16    = 'w'
-	funcTypeSigInt32    = 'd'
-	funcTypeSigInt64    = 'q'
-	funcTypeSigUint     = 'I'
-	funcTypeSigUint8    = 'O'
-	funcTypeSigUint16   = 'W'
-	funcTypeSigUint32   = 'D'
-	funcTypeSigUint64   = 'Q'
-	funcTypeSigFloat32  = 'f'
-	funcTypeSigFloat64  = 'F'
-	funcTypeSigString   = 's'
-	funcTypeSigTypeName = '('
-)
-
-func makeFuncTypeSigKeyFromValues(ctx context.Context, vs Values) funcTypeSigKey {
-	sb := strings.Builder{}
-	vvi := VarValueIterOf(vs)
-	for {
-		if err := vvi.Next(ctx); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			panic(err)
-		}
-		vv := vvi.VarValue(ctx)
-		switch v := vv.Value.(type) {
-		case bool:
-			sb.WriteByte(funcTypeSigBool)
-		case int8:
-			sb.WriteByte(funcTypeSigInt8)
-		case int16:
-			sb.WriteByte(funcTypeSigInt16)
-		case int32:
-			sb.WriteByte(funcTypeSigInt32)
-		case int64:
-			sb.WriteByte(funcTypeSigInt64)
-		case uint8:
-			sb.WriteByte(funcTypeSigUint8)
-		case uint16:
-			sb.WriteByte(funcTypeSigUint16)
-		case uint32:
-			sb.WriteByte(funcTypeSigUint32)
-		case uint64:
-			sb.WriteByte(funcTypeSigUint64)
-		case float32:
-			sb.WriteByte(funcTypeSigFloat32)
-		case float64:
-			sb.WriteByte(funcTypeSigFloat64)
-		case string:
-			sb.WriteByte(funcTypeSigString)
-		default:
-			name := fmt.Sprintf("%T", v)
-			sb.WriteByte(funcTypeSigTypeName)
-			sb.WriteByte(byte(len(name)))
-			sb.WriteString(name)
-		}
-	}
-	return funcTypeSigKey(sb.String())
-}
-
-func (k funcTypeSigKey) appendString(sb *strings.Builder) {
-	sb.WriteByte('[')
-	for i := 0; i < len(k); i++ {
-		if i > 0 {
-			sb.WriteByte(' ')
-		}
-		if k[i] == funcTypeSigTypeName {
-			i++
-			j := int(k[i])
-			i++
-			sb.WriteString(string(k[i : i+j]))
-			i += j - 1 // loop will increment 1
-			continue
-		}
-		sb.WriteByte(k[i])
-	}
-	sb.WriteByte(']')
-}
-
-func (k funcTypeSigKey) String() string {
-	var sb strings.Builder
-	k.appendString(&sb)
-	return sb.String()
 }

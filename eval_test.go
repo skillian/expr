@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/skillian/expr"
+	"github.com/skillian/logging"
 )
 
 type evalTest struct {
@@ -19,6 +21,7 @@ type evalTest struct {
 
 var evalTests = []evalTest{
 	{expr.Not{true}, nil, false, ""},
+	{expr.Not{2}, nil, -3, ""},
 	{expr.Eq{1, 1}, nil, true, ""},
 	{expr.Eq{big.NewRat(1, 1), big.NewRat(2, 1)}, nil, false, ""},
 	{expr.Eq{false, false}, nil, true, ""},
@@ -77,10 +80,18 @@ var evalTests = []evalTest{
 	{expr.Div{big.NewRat(1, 1), 1}, nil, big.NewRat(1, 1), ""},
 
 	// member access:
-	{expr.Mem{map[string]string{"hello": "world"}, "hello"}, nil, "world", ""},
-	{expr.Mem{&(struct{ A string }{A: "helloWorld"}), 0}, nil, "helloWorld", ""},
-	{expr.Mem{expr.Mem{&TestOuter{Inner: TestInner{S: "asdf"}}, 0}, 0}, nil, "asdf", ""},
-	{expr.Mem{expr.Mem{&TestOuter2{Inner: &TestInner{S: "asdf"}}, 0}, 0}, nil, "asdf", ""},
+	{expr.Mem{map[string]interface{}{"hello": "world"}, "hello"}, nil, "world", ""},
+	{func() expr.Expr {
+		s := &(struct{ A string }{A: "helloWorld"})
+		sf := reflect.TypeOf(s).Elem().Field(0)
+		return expr.Mem{s, &sf}
+	}(), nil, "helloWorld", ""},
+	{func() expr.Expr {
+		s := &TestOuter{Inner: TestInner{S: "asdf"}}
+		sf0 := reflect.TypeOf(s).Elem().Field(0)
+		sf1 := reflect.TypeOf(&s.Inner).Elem().Field(0)
+		return expr.Mem{expr.Mem{s, &sf0}, &sf1}
+	}(), nil, "asdf", ""},
 
 	// variables:
 	func() evalTest {
@@ -99,11 +110,18 @@ var evalTests = []evalTest{
 	{expr.Eq{expr.Tuple{1, 2}, expr.Tuple{1, 2}}, nil, true, ""},
 
 	// negative tests:
-	// {expr.Not{2}, nil, false, "invalid type"},
 }
 
 func TestEval(t *testing.T) {
-	ctx := expr.WithFuncCache(context.Background())
+	testCtx := expr.WithFuncCache(context.Background())
+	closeHandler := logging.TestingHandler(
+		logger, t,
+		logging.HandlerFormatter(logging.FormatterFunc(func(e *logging.Event) string {
+			return fmt.Sprintf(e.Msg, e.Args...)
+		})),
+		logging.HandlerLevel(logging.InfoLevel),
+	)
+	defer closeHandler()
 	for i := 0; i < 2; i++ {
 		// run tests twice to test function caching
 		for _, tc := range evalTests {
@@ -112,11 +130,19 @@ func TestEval(t *testing.T) {
 				if len(tc.varVals) > 0 {
 					vs = expr.NewValues(tc.varVals...)
 				}
-				res, err := expr.Eval(ctx, tc.e, vs)
+				ctx := expr.AddValuesToContext(testCtx, vs)
+				f, err := expr.FuncOfExpr(ctx, tc.e, vs)
+				if err != nil {
+					t.Logf("%v:\n%v", tc.e, f)
+				}
+				handleErr(t, err, tc.err)
+				res, err := f.Call(ctx, vs)
 				handleErr(t, err, tc.err)
 				if !eq(res, tc.expect) {
 					t.Fatalf(
-						"expected:\n\t%[1]v (type: %[1]T)\nbut actual value:\n\t%[2]v (type: %[2]T)",
+						"expected:\n\t%[1]v (type: %[1]T)\n"+
+							"but actual value:\n"+
+							"\t%[2]v (type: %[2]T)",
 						tc.expect, res,
 					)
 				}

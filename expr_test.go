@@ -3,81 +3,35 @@ package expr_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
-	"unsafe"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/expr"
+	"github.com/skillian/logging"
 )
 
-type exprKind uint8
-
-const (
-	invalidKind exprKind = iota
-	unaryKind
-	binaryKind
+var (
+	logger = logging.GetLogger(
+		expr.PkgName,
+		logging.LoggerLevel(logging.EverythingLevel),
+	)
 )
-
-func (k exprKind) String() string {
-	return ([...]string{"invalid", "unary", "binary"})[int(k)]
-}
-
-func exprKindOf(e expr.Expr) exprKind {
-	switch e.(type) {
-	case expr.Unary:
-		return unaryKind
-	case expr.Binary:
-		return binaryKind
-	}
-	return invalidKind
-}
-
-type exprKindTest struct {
-	e expr.Expr
-	k exprKind
-}
-
-var exprKindTests = []exprKindTest{
-	{expr.Not{}, unaryKind},
-	{expr.Eq{}, binaryKind},
-	{expr.Ne{}, binaryKind},
-	{expr.Gt{}, binaryKind},
-	{expr.Ge{}, binaryKind},
-	{expr.Lt{}, binaryKind},
-	{expr.Le{}, binaryKind},
-	{expr.And{}, binaryKind},
-	{expr.Or{}, binaryKind},
-	{expr.Add{}, binaryKind},
-	{expr.Sub{}, binaryKind},
-	{expr.Mul{}, binaryKind},
-	{expr.Div{}, binaryKind},
-	{expr.Mem{}, binaryKind},
-}
-
-func TestExprKinds(t *testing.T) {
-	for _, tc := range exprKindTests {
-		t.Run(fmt.Sprintf("%T", tc.e), func(t *testing.T) {
-			k := exprKindOf(tc.e)
-			if k != tc.k {
-				t.Fatalf(
-					"expected %T == %v. Actual: %v",
-					tc.e, tc.k, k,
-				)
-			}
-		})
-	}
-}
 
 func TestMemOf(t *testing.T) {
-	var temp [8]uint64
+	ctx := ctxutil.Background()
 	type S0 struct {
 		I0 int
 	}
-	s0 := (*S0)(unsafe.Pointer(&temp))
+	s0 := &S0{I0: 123}
+	vs := expr.NewValues(expr.VarValue{dummyVar, s0})
+	ctx = expr.AddValuesToContext(ctx, vs)
 	m := expr.MemOf(dummyVar, s0, &s0.I0)
-	if m[1] != 0 {
-		t.Fatalf("expected member 0 == 0, not %[1]#v (type: %[1]T)", m[1])
+	res, err := expr.Eval(ctx, m, vs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != 123 {
+		t.Fatal("expected", m, "==", 123, "but got:", res)
 	}
 	type S1 struct {
 		I0 int64
@@ -85,14 +39,18 @@ func TestMemOf(t *testing.T) {
 		S0 string
 		S1 string
 	}
-	s1 := (*S1)(unsafe.Pointer(&temp))
-	m = expr.MemOf(dummyVar, s1, &s1.S0)
-	if m[1] != 2 {
-		t.Fatalf("expected member 0 == 2, not %[1]#v (type: %[1]T)", m[1])
+	const helloWorld = "hello, world!"
+	s1 := &S1{S0: helloWorld}
+	if err = vs.Set(ctx, dummyVar, s1); err != nil {
+		t.Fatal(err)
 	}
-	m = expr.MemOf(dummyVar, s1, &s1.S1)
-	if m[1] != 3 {
-		t.Fatalf("expected member 0 == 3, not %[1]#v (type: %[1]T)", m[1])
+	m = expr.MemOf(dummyVar, s1, &s1.S0)
+	res, err = expr.Eval(ctx, m, vs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != helloWorld {
+		t.Fatalf("expected member 0 == 2, not %[1]#v (type: %[1]T)", m[1])
 	}
 }
 

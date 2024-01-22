@@ -11,15 +11,50 @@ import (
 	"sync"
 
 	"github.com/skillian/ctxutil"
+	"github.com/skillian/logging"
+)
+
+const (
+	// PkgName gets this package's name as a string constant
+	PkgName = "github.com/skillian/expr"
+
+	// Debug is set when expensive assertions should be checked.
+	Debug = true
+
+	// MoreUnsafe enables potentially unsupported unsafe code
+	MoreUnsafe = true
+)
+
+var (
+	logger = logging.GetLogger(PkgName)
 )
 
 // Expr is a basic expression
 type Expr interface{}
 
+var exprType = reflect.TypeOf((*Expr)(nil)).Elem()
+
 // Tuple is a finite ordered sequence of expressions.
 type Tuple []Expr
 
-func (t Tuple) Operands() []Expr { return ([]Expr)(t) }
+func (t Tuple) Eq(t2 Tuple) bool {
+	if len(t) != len(t2) {
+		return false
+	}
+	var vs eeValues
+	for i, x := range t {
+		vs.push(t2[i])
+		et := typeOf(x)
+		et.push(&vs, x)
+		vs.pushType(et)
+		if !et.eq(&vs) {
+			return false
+		}
+	}
+	return true
+}
+
+func (t Tuple) Operands() []Expr { return []Expr(t) }
 
 // Unary is a unary (single-operand) expression, for example the negation
 // operator.
@@ -108,7 +143,6 @@ func (x Le) appendString(sb *strings.Builder) { appendBinary(sb, "le", x) }
 //	false && true == false
 //	true && false == false
 //	true && true == true
-//
 type And [2]Expr
 
 func (x And) Operands() [2]Expr { return ([2]Expr)(x) }
@@ -123,7 +157,6 @@ func (x And) appendString(sb *strings.Builder) { appendBinary(sb, "and", x) }
 //	false || true == true
 //	true || false == true
 //	true || true == true
-//
 type Or [2]Expr
 
 func (x Or) Operands() [2]Expr { return ([2]Expr)(x) }
@@ -171,64 +204,58 @@ func (x Div) appendString(sb *strings.Builder) { appendBinary(sb, "/", x) }
 // Mem selects a member of a source expression.
 type Mem [2]Expr
 
-var mems sync.Map // map[reflect.Type][]uintptr
+var mems sync.Map // map[reflect.Type][]reflect.StructField
 
 func MemOf(e Expr, base, field interface{}) Mem {
 	getPtr := func(v interface{}) (rv reflect.Value, p uintptr) {
 		rv = reflect.ValueOf(v)
 		if !rv.IsValid() {
-			panic("MemOf: base is invalid")
+			panic("MemOf: base or field is invalid")
 		}
 		if rv.Kind() != reflect.Ptr {
 			panic(fmt.Sprintf(
-				"MemOf: base must be pointer to struct, not %T",
+				"MemOf: base and field must be pointer, not %T",
 				base,
 			))
 		}
 		if rv.IsNil() {
-			panic("MemOf: base is nil")
+			panic("MemOf: base or field is nil")
 		}
 		p = rv.Pointer()
 		return
 	}
-	type offsetType struct {
-		offset uintptr
-		rtype  reflect.Type
-	}
-	getOffsets := func(t reflect.Type) *[]offsetType {
+	getStructFields := func(t reflect.Type) *[]reflect.StructField {
 		k := interface{}(t)
 		v, loaded := mems.Load(k)
 		if loaded {
-			return v.(*[]offsetType)
+			return v.(*[]reflect.StructField)
 		}
-		offs := new([]offsetType)
-		*offs = make([]offsetType, 0, t.NumField())
+		offs := new([]reflect.StructField)
+		*offs = make([]reflect.StructField, 0, t.NumField())
 		for i := 0; i < cap(*offs); i++ {
 			f := t.Field(i)
 			if f.Type.Size() == 0 {
 				continue
 			}
-			*offs = append(*offs, offsetType{
-				offset: f.Offset,
-				rtype:  reflect.PtrTo(f.Type),
-			})
+			*offs = append(*offs, f)
 		}
 		v, loaded = mems.LoadOrStore(k, offs)
 		if loaded {
-			return v.(*[]offsetType)
+			return v.(*[]reflect.StructField)
 		}
 		return offs
 	}
 	bv, bp := getPtr(base)
 	fv, fp := getPtr(field)
-	ft := fv.Type()
+	ft := fv.Elem().Type()
 	foff := fp - bp
-	offs := *getOffsets(bv.Type().Elem())
+	structFields := *getStructFields(bv.Type().Elem())
 	// TODO: Maybe binary search would be better, but I'm assuming tiny
 	// numbers of fields for now:
-	for i, ot := range offs {
-		if ot.offset == foff && ot.rtype == ft {
-			return Mem{e, i}
+	for i := range structFields {
+		sf := &structFields[i]
+		if sf.Offset == foff && sf.Type == ft {
+			return Mem{e, sf}
 		}
 	}
 	panic(fmt.Errorf(
@@ -247,8 +274,8 @@ func (x Mem) appendString(sb *strings.Builder) { appendBinary(sb, ".", x) }
 type Var interface {
 	Expr
 
-	// Var differentiates the Var from an Expr but could just
-	// return itself
+	// Var differentiates a Var from an Expr but could just
+	// return itself.
 	Var() Var
 }
 
@@ -265,6 +292,14 @@ type Values interface {
 	Vars() VarIter
 }
 
+// AddValuesToContext adds Values to the context so that expression
+// evaluation can use them further down the stack
+func AddValuesToContext(ctx context.Context, vs Values) context.Context {
+	return ctxutil.WithValue(ctx, ValuesContextKey(), vs)
+}
+
+// ValuesFromContextOK attempts to retrieve the values from the context
+// and returns false if the values cannot be found.
 func ValuesFromContextOK(ctx context.Context) (vs Values, ok bool) {
 	vs, ok = ctxutil.Value(ctx, ValuesContextKey()).(Values)
 	return
@@ -334,7 +369,7 @@ type VarValue struct {
 
 // NewValues creates Values from a sequence of Vars and their values.
 func NewValues(ps ...VarValue) Values {
-	_, capacity := minMax(1<<bits.Len(uint(len(ps))), 4)
+	_, capacity := minMaxInt(1<<bits.Len(uint(len(ps))), 4)
 	vs := &valueList{
 		keys: make([]Var, len(ps), capacity),
 		vals: make([]interface{}, len(ps), capacity),
@@ -531,7 +566,7 @@ var tryLenOK, _ = func() (func(v interface{}) (int, bool), func(v interface{}) (
 			case nilPtr:
 				return 0, fmt.Errorf(
 					"%w: cannot get length of nil pointer",
-					errInvalidOp,
+					ErrInvalidType,
 				)
 			case badType:
 				return 0, fmt.Errorf("%w: %T", ErrInvalidType, v)
@@ -594,9 +629,7 @@ func appendBinary(sb *strings.Builder, op string, b Binary) {
 // HasOperands returns true if the expression has operands
 func HasOperands(e Expr) bool {
 	switch e.(type) {
-	case Unary:
-		return true
-	case Binary:
+	case Unary, Binary:
 		return true
 	case interface{ Operands() []Expr }:
 		return true
@@ -644,39 +677,44 @@ func Rewrite(e Expr, f func(Expr) Expr) Expr {
 	return f(e)
 }
 
-// Walk the expression tree, calling f(e) with the expression when
-// "entering" the expression and f(nil) when "exiting" an expression.
-//
-// For example, Add{1, 2} would result in the following calls to f:
-//
-//	f(Add{1, 2})
-//	f(1)
-//	f(nil)
-//	f(2)
-//	f(nil)
-//	f(nil)
-//
-// Note that WalkOptions such as WalkOperandsBackwards can change the
-// call behavior.
-func Walk(e Expr, f func(Expr) bool, options ...WalkOption) bool {
+type Visitor interface {
+	Visit(context.Context, Expr) (Visitor, error)
+}
+
+type VisitFunc func(context.Context, Expr) (Visitor, error)
+
+func (f VisitFunc) Visit(ctx context.Context, e Expr) (Visitor, error) {
+	return f(ctx, e)
+}
+
+func Walk(ctx context.Context, e Expr, v Visitor, options ...WalkOption) error {
 	var cfg walkConfig
 	for _, opt := range options {
 		opt(&cfg)
 	}
-	if !f(e) {
-		return false
+	w, err := v.Visit(ctx, e)
+	if err != nil {
+		return err
+	}
+	if w == nil {
+		return nil
 	}
 	ops := Operands(e)
 	if cfg.flags&walkBackwards == walkBackwards {
 		for i := len(ops) - 1; i >= 0; i-- {
-			Walk(ops[i], f, options...)
+			if err = Walk(ctx, ops[i], w, options...); err != nil {
+				return err
+			}
 		}
 	} else {
 		for _, op := range ops {
-			Walk(op, f)
+			if err = Walk(ctx, op, w, options...); err != nil {
+				return err
+			}
 		}
 	}
-	return f(nil)
+	_, err = w.Visit(ctx, nil)
+	return err
 }
 
 type walkConfig struct {
@@ -695,6 +733,8 @@ type WalkOption func(c *walkConfig)
 // WalkOperandsBackwards walks the operands of the expression backwards
 // which is useful for the internal compilation process which generates
 // virtual machine instructions.
-var WalkOperandsBackwards = WalkOption(func(c *walkConfig) {
-	c.flags |= walkBackwards
-})
+func WalkOperandsBackwards() WalkOption {
+	return func(c *walkConfig) {
+		c.flags |= walkBackwards
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 
 	"github.com/skillian/expr"
 )
@@ -17,6 +18,12 @@ type localStreamer struct {
 type localFilterer localStreamer
 
 func NewLocalFilterer(ctx context.Context, sr Streamer, e expr.Expr) (Streamer, error) {
+	if srcFr, ok := sr.(localFilterer); ok {
+		return localFilterer{
+			source: srcFr.source,
+			e:      expr.And{srcFr.e, e},
+		}, nil
+	}
 	return localFilterer{sr, e}, nil
 }
 
@@ -72,7 +79,7 @@ func (f *localFilter) initNext(ctx context.Context) error {
 	// compilation must happen here because only here
 	// do the required variables have values of the proper
 	// type.
-	f.f, err = expr.FuncOf(ctx, f.e, vs)
+	f.f, err = expr.FuncOfExpr(ctx, f.e, vs)
 	if err != nil {
 		return fmt.Errorf(
 			"failed to compile local filter %v's filter "+
@@ -177,7 +184,7 @@ func (m *localMap) initNext(ctx context.Context) error {
 	// compilation must happen here because only here
 	// do the required variables have values of the proper
 	// type.
-	m.f, err = expr.FuncOf(ctx, m.e, vs)
+	m.f, err = expr.FuncOfExpr(ctx, m.e, vs)
 	if err != nil {
 		return fmt.Errorf(
 			"failed to compile map expression %v: %w",
@@ -293,9 +300,9 @@ func (j *localJoin) initNext(ctx context.Context) error {
 	// do the required variables have values of the proper
 	// type.
 	what, e := "when", j.joiner.when
-	if j.when, err = expr.FuncOf(ctx, e, vs); err == nil {
+	if j.when, err = expr.FuncOfExpr(ctx, e, vs); err == nil {
 		what, e = "then", j.joiner.then
-		j.then, err = expr.FuncOf(ctx, e, vs)
+		j.then, err = expr.FuncOfExpr(ctx, e, vs)
 	}
 	if err != nil {
 		return fmt.Errorf(
@@ -462,50 +469,53 @@ func resetStream(ctx context.Context, s Stream) error {
 }
 
 // slice wraps a slice of anything.
-//
-// Implementation detail:  This started off as `type Slice[T any] T[]`
-// but that became a problem if you, e.g., join a slice into itself
-// because the var couldn't be unique and deterministic.  So instead,
-// you have to use SliceOf to create a unique slice streamer.
-type slice[T any] struct {
-	vs []T
+type slice struct {
+	rv reflect.Value
 }
 
-// SliceOf creates a streamer from a slice of anything.
-func SliceOf[T any](vs []T) Streamer {
-	return &slice[T]{vs}
+// FromSlice creates a streamer from a slice of anything.
+func FromSlice(vs interface{}) Streamer {
+	rv := reflect.ValueOf(vs)
+	if rv.Kind() != reflect.Slice {
+		panic(fmt.Sprintf(
+			"%[1]v (type: %[1]T) is not a slice",
+			vs,
+		))
+	}
+	return &slice{rv}
 }
 
 var _ interface {
 	Streamer
-} = (*slice[int])(nil)
+} = (*slice)(nil)
 
-func (sl *slice[T]) Stream(ctx context.Context) (Stream, error) {
-	return &sliceStream[T]{sl.vs, sl.Var()}, nil
+func (sl *slice) Stream(ctx context.Context) (Stream, error) {
+	return &sliceStream{sl.rv, sl.Var()}, nil
 }
 
-func (sl *slice[T]) Var() expr.Var { return sl }
+func (sl *slice) Var() expr.Var { return sl }
 
-type sliceStream[T any] struct {
-	vs []T
+type sliceStream struct {
+	rv reflect.Value
 	va expr.Var
 }
 
 var _ interface {
 	Stream
-} = (*sliceStream[int])(nil)
+} = (*sliceStream)(nil)
 
-func (ss *sliceStream[T]) Next(ctx context.Context) error {
-	if len(ss.vs) == 0 {
+func (ss *sliceStream) Next(ctx context.Context) error {
+	length := ss.rv.Len()
+	if length == 0 {
 		return io.EOF
 	}
 	vs, err := expr.ValuesFromContext(ctx)
 	if err != nil {
 		return err
 	}
-	v := (interface{})(ss.vs[0])
-	ss.vs = ss.vs[1:]
+	v := ss.rv.Index(0).Interface()
+	ss.rv = ss.rv.Slice(1, length)
 	return vs.Set(ctx, ss.va, v)
 }
 
-func (ss *sliceStream[T]) Var() expr.Var { return ss.va }
+func (ss *sliceStream) Var() expr.Var { return ss.va }
