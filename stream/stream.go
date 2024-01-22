@@ -19,70 +19,56 @@ type Streamer interface {
 
 // EachFunc is a function passed to Each and called for each value retrieved
 // while iterating elements from the stream.
-type EachFunc[TState, TValue any] func(context.Context, Stream, TState, TValue) error
-
-type eachStateType[TState, TValue any] struct {
-	sr    Streamer
-	state TState
-	f     EachFunc[TState, TValue]
-}
+type EachFunc func(ctx context.Context, s Stream, state, value interface{}) (err error)
 
 // Each executes f on each element in the streamer.
-func Each[TState, TValue any](
-	ctx context.Context, sr Streamer, state TState, f EachFunc[TState, TValue],
-) error {
-	_, err := expr.WithEvalContext(ctx, eachStateType[TState, TValue]{sr, state, f}, func(
-		ctx context.Context, state2 eachStateType[TState, TValue],
-	) (struct{}, error) {
-		sr, state, f := state2.sr, state2.state, state2.f
+func Each(
+	ctx context.Context, sr Streamer, state interface{},
+	f EachFunc,
+) (err error) {
+	type eachStateType struct {
+		sr    Streamer
+		state interface{}
+		f     EachFunc
+	}
+	err = expr.WithEvalContext(ctx, eachStateType{sr, state, f}, func(
+		ctx context.Context, state2 interface{},
+	) (err error) {
+		eachState := state2.(eachStateType)
+		sr, state, f := eachState.sr, eachState.state, eachState.f
 		ctx, vs := expr.GetOrAddValuesToContext(ctx)
-		va := sr.Var()
-		if _, err := vs.Get(ctx, va); errors.Is(err, expr.ErrNotFound) {
-			var v TValue
-			if err2 := vs.Set(ctx, va, &v); err2 != nil {
-				return struct{}{}, errors.ErrorfWithCauseAndContext(
-					err2, err,
-					"failed to initialize "+
-						"streamer variable %v "+
-						"with model %[2]T: "+
-						"%[2]v",
-					sr, &v,
-				)
-			}
-		}
 		s, err := sr.Stream(ctx)
 		if err != nil {
-			return struct{}{}, fmt.Errorf("failed to create stream from %v: %w", sr, err)
+			return fmt.Errorf(
+				"failed to create stream from %v: %w",
+				sr, err,
+			)
 		}
 		for {
-			if err := s.Next(ctx); err != nil {
+			if err = s.Next(ctx); err != nil {
 				if errors.Is(err, io.EOF) {
-					return struct{}{}, nil
+					return nil
 				}
-				return struct{}{}, fmt.Errorf(
-					"error from %v.Next: %w", s, err,
+				return errors.ErrorfWithCause(
+					err, "error from %v.Next", s,
 				)
 			}
 			v, err := vs.Get(ctx, s.Var())
 			if err != nil {
-				return struct{}{}, fmt.Errorf(
-					"failed to get value associated with stream %v: %w",
-					s, err,
+				return errors.ErrorfWithCause(
+					err,
+					"failed to get value "+
+						"associated with "+
+						"stream %v",
+					s,
 				)
 			}
-			v2, ok := v.(TValue)
-			if !ok {
-				return struct{}{}, fmt.Errorf(
-					"%w: expected %T, but actual: %#[2]v (type: %[2]T)",
-					expr.ErrInvalidType, v2, v,
-				)
-			}
-			if err = f(ctx, s, state, v2); err != nil {
-				return struct{}{}, err
+			if err = f(ctx, s, state, v); err != nil {
+				return err
 			}
 		}
 	})
-	return err
+	return
 }
 
 // Stream is a stream of values.  The first call to Next initializes

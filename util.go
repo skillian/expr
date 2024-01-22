@@ -7,13 +7,7 @@ import (
 	"unsafe"
 )
 
-type numberLike interface {
-	~int | ~int8 | ~int16 | ~int32 | ~int64 |
-		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 |
-		~float32 | ~float64
-}
-
-func minMax[T numberLike](a, b T) (min, max T) {
+func minMaxInt(a, b int) (min, max int) {
 	if a > b {
 		return b, a
 	}
@@ -41,25 +35,6 @@ func ifacePtrData(v unsafe.Pointer) *ifaceData {
 }
 
 type goFuncData unsafe.Pointer
-
-type Tuple2[T0, T1 any] struct {
-	V0 T0
-	V1 T1
-}
-
-func Tuple2Of[T0, T1 any](v0 T0, v1 T1) Tuple2[T0, T1] {
-	return Tuple2[T0, T1]{V0: v0, V1: v1}
-}
-
-type Tuple3[T0, T1, T2 any] struct {
-	V0 T0
-	V1 T1
-	V2 T2
-}
-
-func Tuple3Of[T0, T1, T2 any](v0 T0, v1 T1, v2 T2) Tuple3[T0, T1, T2] {
-	return Tuple3[T0, T1, T2]{V0: v0, V1: v1, V2: v2}
-}
 
 func reflectTypeName(t reflect.Type) string {
 	var buildName func(t reflect.Type, parts []string) []string

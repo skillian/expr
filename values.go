@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"math/bits"
+	"reflect"
 	"unsafe"
 )
 
@@ -196,13 +197,13 @@ func makeEEValueKey(typeIndex, valueIndex int) eeValueKey {
 }
 
 func eeValueKeyFromOpCodes(ops []opCode) (k eeValueKey, n int) {
-	bs := asByteSlice(ops)
+	bs := opCodesBytes(ops)
 	k.data = *((*uint)(unsafe.Pointer(&bs[0])))
 	return k, int(unsafe.Sizeof(uint(0)))
 }
 
 func (vk eeValueKey) appendToOpCodes(ops []opCode) []opCode {
-	return appendValBitsToBytes(ops, vk.data)
+	return opCodesFromBytes(appendValBitsToBytes(opCodesBytes(ops), vk.data))
 }
 
 func (vk eeValueKey) typeAndValueIndexes() (typeIndex, valueIndex int) {
@@ -210,19 +211,26 @@ func (vk eeValueKey) typeAndValueIndexes() (typeIndex, valueIndex int) {
 		int(vk.data>>eeValueKeyTypeBits) & eeValueKeyValIndexMask
 }
 
-func asByteSlice[T ~byte](sl []T) []byte {
-	return *((*[]byte)(unsafe.Pointer(&sl)))
+func appendValBitsToBytes(bs []byte, v interface{}) []byte {
+	rv := reflect.ValueOf(v)
+	rv2 := reflect.New(rv.Type())
+	rv2.Elem().Set(rv)
+	return appendPtrToValBitsToBytes(bs, rv2.Interface())
 }
 
-func fromByteSlice[T ~byte](sl []byte) []T {
-	return *((*[]T)(unsafe.Pointer(&sl)))
+func valBytes(v interface{}) (vBytes []byte) {
+	rv := reflect.ValueOf(v)
+	rt := rv.Type()
+	if rt.Kind() != reflect.Pointer {
+		panic("must be pointer")
+	}
+	vbsh := (*reflect.SliceHeader)(unsafe.Pointer(&vBytes))
+	vbsh.Data = rv.Pointer()
+	vbsh.Cap = int(rt.Size())
+	vbsh.Len = vbsh.Cap
+	return
 }
 
-func appendValBitsToBytes[TByte ~byte, TValue any](bs []TByte, v TValue) []TByte {
-	return appendPtrToValBitsToBytes(bs, &v)
-}
-
-func appendPtrToValBitsToBytes[TByte ~byte, TValue any](bs []TByte, v *TValue) []TByte {
-	vBytes := unsafe.Slice((*byte)(unsafe.Pointer(v)), unsafe.Sizeof(*v))
-	return fromByteSlice[TByte](append(asByteSlice(bs), vBytes...))
+func appendPtrToValBitsToBytes(bs []byte, v interface{}) []byte {
+	return append(bs, valBytes(v)...)
 }

@@ -20,6 +20,9 @@ const (
 
 	// Debug is set when expensive assertions should be checked.
 	Debug = true
+
+	// MoreUnsafe enables potentially unsupported unsafe code
+	MoreUnsafe = true
 )
 
 var (
@@ -366,7 +369,7 @@ type VarValue struct {
 
 // NewValues creates Values from a sequence of Vars and their values.
 func NewValues(ps ...VarValue) Values {
-	_, capacity := minMax(1<<bits.Len(uint(len(ps))), 4)
+	_, capacity := minMaxInt(1<<bits.Len(uint(len(ps))), 4)
 	vs := &valueList{
 		keys: make([]Var, len(ps), capacity),
 		vals: make([]interface{}, len(ps), capacity),

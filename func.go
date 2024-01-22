@@ -249,7 +249,7 @@ func (b *exprFuncBuilder) Visit(ctx context.Context, e Expr) (Visitor, error) {
 		return b, nil
 	case opPackTuple:
 		top.codes = append(top.codes, opPackTuple)
-		top.codes = appendValBitsToBytes(top.codes, len(top.opers))
+		top.codes = opCodesFromBytes(appendValBitsToBytes(opCodesBytes(top.codes), len(top.opers)))
 		top.t = typeOf(Tuple(nil))
 		return b, nil
 	}
@@ -736,11 +736,19 @@ var _ interface {
 	Func
 } = (*opFunc)(nil)
 
-func (f *opFunc) Call(ctx context.Context, vs Values) (interface{}, error) {
-	return WithEvalContext(ctx, interface{}(nil), func(ctx context.Context, _ interface{}) (res interface{}, err error) {
-		ee := ctxutil.Value(ctx, (*exprEvaluator)(nil).ContextKey()).(*exprEvaluator)
-		return ee.evalFunc(ctx, f, vs)
+func (f *opFunc) Call(ctx context.Context, vs Values) (res interface{}, err error) {
+	type callStateType struct {
+		res *interface{}
+	}
+	err = WithEvalContext(ctx, callStateType{&res}, func(
+		ctx context.Context, state interface{},
+	) (err error) {
+		p := state.(callStateType).res
+		ee := ctxutil.Value(ctx, exprEvaluatorContextKey()).(*exprEvaluator)
+		*p, err = ee.evalFunc(ctx, f, vs)
+		return
 	})
+	return
 }
 
 type funcCache struct {

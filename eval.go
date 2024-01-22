@@ -47,17 +47,20 @@ func FuncOfExpr(ctx context.Context, e Expr, vs Values) (Func, error) {
 	return f, nil
 }
 
+type WithEvalContextFunc func(ctx context.Context, state interface{}) error
+
 // WithEvalContext adds an expression evaluator to the context
-func WithEvalContext[TState, TResult any](ctx context.Context, state TState, f func(context.Context, TState) (TResult, error)) (TResult, error) {
-	key := (*exprEvaluator)(nil).ContextKey()
+func WithEvalContext(ctx context.Context, state interface{}, f func(ctx context.Context, state interface{}) (err error)) (err error) {
+	key := exprEvaluatorContextKey()
 	eev := exprEvaluators.Get()
+	ee := eev.(*exprEvaluator)
 	ctx = ctxutil.WithValue(ctx, key, eev)
-	res, err := f(ctx, state)
+	err = f(ctx, state)
 	if err == nil {
-		eev.(*exprEvaluator).reset()
+		ee.reset()
 		exprEvaluators.Put(eev)
 	}
-	return res, err
+	return
 }
 
 // exprEvaluator is a VM that evaluates expressions.  exprEvaluators
@@ -75,7 +78,9 @@ type exprEvaluator struct {
 	strcmp func(a, b string) int
 }
 
-func (ee *exprEvaluator) ContextKey() interface{} { return (*exprEvaluator)(nil) }
+func exprEvaluatorContextKey() interface{} { return (*exprEvaluator)(nil) }
+
+func (ee *exprEvaluator) ContextKey() interface{} { return exprEvaluatorContextKey() }
 
 // eeFuncFrame is an exprEvaluator function frame.
 type eeFuncFrame struct {
@@ -577,6 +582,18 @@ func (ee *exprEvaluator) reset() {
 
 //go:generate stringer -type=opCode -trimprefix=op
 type opCode uint8
+
+func opCodesBytes(ops []opCode) (bs []byte) {
+	_ = [1]struct{}{}[unsafe.Sizeof(ops[0])-unsafe.Sizeof(bs[0])]
+	bs = *((*[]byte)(unsafe.Pointer(&ops)))
+	return
+}
+
+func opCodesFromBytes(bs []byte) (ops []opCode) {
+	_ = [1]struct{}{}[unsafe.Sizeof(ops[0])-unsafe.Sizeof(bs[0])]
+	ops = *((*[]opCode)(unsafe.Pointer(&bs)))
+	return
+}
 
 const (
 	// opNop does nothing

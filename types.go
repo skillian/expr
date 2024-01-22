@@ -11,34 +11,25 @@ import (
 )
 
 // RegisterIntType registers an int-kind type
-func RegisterIntType[T ~int]() {
-	var v T
+func RegisterIntType(v interface{}) {
 	rt := reflect.TypeOf(v)
-	eeTypes.LoadOrStore(rt, eeIntKindType[T]{rt: rt})
+	eeTypes.LoadOrStore(rt, eeIntKindType{eeKindType{rt: rt}})
 }
 
 // RegisterInt64Type registers an int64-kind type
-func RegisterInt64Type[T ~int64]() {
-	var v T
+func RegisterInt64Type(v interface{}) {
 	rt := reflect.TypeOf(v)
-	eeTypes.LoadOrStore(rt, eeInt64KindType[T]{rt: rt})
+	eeTypes.LoadOrStore(rt, eeInt64KindType{eeKindType{rt: rt}})
 }
 
 // RegisterInt64Type registers an int64-kind type
-func RegisterStringType[T ~string]() {
-	var v T
+func RegisterStringType(v interface{}) {
 	rt := reflect.TypeOf(v)
-	st, _ := eeTypes.LoadOrStore(rt, eeStringKindType[T]{rt: rt})
-	var m map[T]interface{}
-	rt = reflect.TypeOf(m)
-	eeTypes.LoadOrStore(rt, eeMapStrAnyKindType[T]{
-		eeReflectType: eeReflectType{rt: rt},
-		keyType:       st.(eeStringKindType[T]),
-	})
+	eeTypes.LoadOrStore(rt, eeStringKindType{eeKindType{rt: rt}})
 }
 
 func init() {
-	RegisterInt64Type[time.Duration]()
+	RegisterInt64Type(time.Duration(0))
 }
 
 // eeType is the definition of a type that is used by the
@@ -250,26 +241,24 @@ var (
 	}
 
 	eeAnyType   eeType = eeAnyKindType{}
-	eeBoolType  eeType = eeBoolKindType[bool]{rt: boolType}
+	eeBoolType  eeType = eeBoolKindType{eeKindType{rt: boolType}}
 	eeErrorType eeType = &eeReflectType{
 		rt:         errorType,
 		eeTypeInit: defaultTypeInit(),
 	}
-	eeFloat64Type eeType = eeFloatKindType[float64]{rt: float64Type}
-	eeIntType     eeType = eeIntKindType[int]{rt: intType}
-	eeInt64Type   eeType = eeInt64KindType[int64]{rt: int64Type}
+	eeFloat64Type eeType = eeFloatKindType{eeKindType{rt: float64Type}}
+	eeIntType     eeType = eeIntKindType{eeKindType{rt: intType}}
+	eeInt64Type   eeType = eeInt64KindType{eeKindType{rt: int64Type}}
 	eeRatType     eeType = eeRatKindType{rt: bigRatType}
-	eeStringType  eeType = eeStringKindType[string]{rt: stringType}
+	eeStringType  eeType = eeStringKindType{eeKindType{rt: stringType}}
 
-	eeMapStrAnyType eeType = &eeMapStrAnyKindType[string]{
+	eeMapStrAnyType eeType = &eeMapKindType{
 		eeReflectType: eeReflectType{
 			rt:         mapStrAnyType,
 			eeTypeInit: defaultTypeInit(),
 		},
-		keyType: eeStringType.(eeStringKindType[string]),
+		keyType: eeStringType.(eeStringKindType),
 	}
-
-	eeTupleType = &eeSliceKindType[Tuple, Expr]{rt: tupleType}
 
 	eeTypes = func() (m sync.Map) {
 		for _, et := range []eeType{
@@ -281,7 +270,6 @@ var (
 			eeRatType,
 			eeStringType,
 			eeMapStrAnyType,
-			eeTupleType,
 		} {
 			m.Store(et.reflectType(), et)
 		}
@@ -370,7 +358,9 @@ type eeReflectType struct {
 	divOrd int
 }
 
-func eeReflectTypeFn[TArg, TRes any](et *eeReflectType, arg TArg, anyFn, boolFn, floatFn, intFn, ratFn, strFn func(TArg) TRes) TRes {
+type eeReflectTypeFnFunc func(arg interface{})
+
+func eeReflectTypeFn(et *eeReflectType, arg interface{}, anyFn, boolFn, floatFn, intFn, ratFn, strFn eeReflectTypeFnFunc) {
 	if et == nil {
 		panic("et is nil")
 	}
@@ -383,19 +373,19 @@ func eeReflectTypeFn[TArg, TRes any](et *eeReflectType, arg TArg, anyFn, boolFn,
 	}
 	switch et.reflectType().Kind() {
 	case reflect.Bool:
-		return boolFn(arg)
+		boolFn(arg)
 	case reflect.Float32, reflect.Float64:
-		return floatFn(arg)
+		floatFn(arg)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return intFn(arg)
+		intFn(arg)
 	case reflect.Pointer:
 		if et.reflectType().ConvertibleTo(bigRatType) {
-			return ratFn(arg)
+			ratFn(arg)
 		}
 	case reflect.String:
-		return strFn(arg)
+		strFn(arg)
 	}
-	return anyFn(arg)
+	anyFn(arg)
 }
 
 func (et *eeReflectType) call(fnOrd int, vs *eeValues) {
@@ -460,131 +450,192 @@ func (et *eeReflectType) eq(vs *eeValues) bool {
 	return vs.popBool()
 }
 
-func (et *eeReflectType) get(vs *eeValues, i int) interface{} {
-	type TArg struct {
-		rt reflect.Type
-		vs *eeValues
-		i  int
+func (et *eeReflectType) get(vs *eeValues, i int) (res interface{}) {
+	type getStateType struct {
+		rt  reflect.Type
+		res *interface{}
+		vs  *eeValues
+		i   int
 	}
-	return eeReflectTypeFn(
-		et, TArg{et.reflectType(), vs, i},
-		func(args TArg) interface{} { return args.vs.anys[args.i] },
-		func(args TArg) interface{} {
+	eeReflectTypeFn(
+		et, getStateType{et.reflectType(), &res, vs, i},
+		func(getState interface{}) {
+			args := getState.(getStateType)
+			*args.res = args.vs.anys[args.i]
+		},
+		func(getState interface{}) {
+			args := getState.(getStateType)
 			v := args.vs.nums[args.i] != 0
 			if args.rt == boolType {
-				return v
+				*args.res = v
+				return
 			}
-			rv := reflect.New(args.rt).Elem()
-			rv.SetBool(v)
-			return rv.Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
 		},
-		func(args TArg) interface{} {
+		func(getState interface{}) {
+			args := getState.(getStateType)
 			v := (*args.vs.floats())[args.i]
 			if args.rt == float64Type {
-				return v
+				*args.res = v
+				return
 			}
-			rv := reflect.New(args.rt).Elem()
-			rv.SetFloat(v)
-			return rv.Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
 		},
-		func(args TArg) interface{} {
+		func(getState interface{}) {
+			args := getState.(getStateType)
 			v := args.vs.nums[args.i]
 			if args.rt == int64Type {
-				return v
+				*args.res = v
+				return
 			}
-			rv := reflect.New(args.rt).Elem()
-			rv.SetInt(v)
-			return rv.Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
 		},
-		func(args TArg) interface{} {
+		func(getState interface{}) {
+			args := getState.(getStateType)
 			v := args.vs.anys[args.i]
 			if args.rt == reflect.TypeOf(v) {
-				return v
+				*args.res = v
+				return
 			}
-			return reflect.ValueOf(v).Convert(args.rt).Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
 		},
-		func(args TArg) interface{} {
+		func(getState interface{}) {
+			args := getState.(getStateType)
 			v := args.vs.strs[args.i]
 			if args.rt == stringType {
-				return v
+				*args.res = v
+				return
 			}
-			rv := reflect.New(args.rt).Elem()
-			rv.SetString(v)
-			return rv.Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
 		},
 	)
+	return
 }
 
-func (et *eeReflectType) kind() opKind {
-	return eeReflectTypeFn(
-		et, struct{}{},
-		func(_ struct{}) opKind { return opAny },
-		func(_ struct{}) opKind { return opBool },
-		func(_ struct{}) opKind { return opFloat },
-		func(_ struct{}) opKind { return opInt },
-		func(_ struct{}) opKind { return opRat },
-		func(_ struct{}) opKind { return opStr },
+func (et *eeReflectType) kind() (k opKind) {
+	eeReflectTypeFn(
+		et, &k,
+		func(p interface{}) { *(p.(*opKind)) = opAny },
+		func(p interface{}) { *(p.(*opKind)) = opBool },
+		func(p interface{}) { *(p.(*opKind)) = opFloat },
+		func(p interface{}) { *(p.(*opKind)) = opInt },
+		func(p interface{}) { *(p.(*opKind)) = opRat },
+		func(p interface{}) { *(p.(*opKind)) = opStr },
 	)
+	return
 }
 
 func (et *eeReflectType) mul(vs *eeValues) { et.call(et.mulOrd, vs) }
 
-func (et *eeReflectType) pop(vs *eeValues) interface{} {
-	type TArg struct {
-		//rt reflect.Type
-		vs *eeValues
+func (et *eeReflectType) pop(vs *eeValues) (res interface{}) {
+	type popStateType struct {
+		vs  *eeValues
+		res *interface{}
 	}
-	return eeReflectTypeFn(
-		et, TArg{vs},
-		func(arg TArg) interface{} { return arg.vs.popAny() },
-		func(arg TArg) interface{} { return eeBoolType.pop(arg.vs) },
-		func(arg TArg) interface{} { return eeFloat64Type.pop(arg.vs) },
-		func(arg TArg) interface{} { return eeInt64Type.pop(arg.vs) },
-		func(arg TArg) interface{} { return eeRatType.pop(arg.vs) },
-		func(arg TArg) interface{} { return eeStringType.pop(arg.vs) },
+	eeReflectTypeFn(
+		et, popStateType{vs, &res},
+		func(popState interface{}) { arg := popState.(popStateType); *arg.res = arg.vs.popAny() },
+		func(popState interface{}) { arg := popState.(popStateType); *arg.res = eeBoolType.pop(arg.vs) },
+		func(popState interface{}) { arg := popState.(popStateType); *arg.res = eeFloat64Type.pop(arg.vs) },
+		func(popState interface{}) { arg := popState.(popStateType); *arg.res = eeInt64Type.pop(arg.vs) },
+		func(popState interface{}) { arg := popState.(popStateType); *arg.res = eeRatType.pop(arg.vs) },
+		func(popState interface{}) { arg := popState.(popStateType); *arg.res = eeStringType.pop(arg.vs) },
 	)
+	return
 }
 
-func (et *eeReflectType) push(vs *eeValues, v interface{}) int {
-	type TArg struct {
-		//rt reflect.Type
+func (et *eeReflectType) push(vs *eeValues, v interface{}) (i int) {
+	type pushStateType struct {
 		vs *eeValues
 		v  interface{}
+		i  *int
 	}
-	return eeReflectTypeFn(
-		et, TArg{vs, v},
-		func(arg TArg) int { return arg.vs.pushAny(arg.v) },
-		func(arg TArg) int { return eeBoolType.push(arg.vs, arg.v) },
-		func(arg TArg) int { return eeFloat64Type.push(arg.vs, arg.v) },
-		func(arg TArg) int { return eeInt64Type.push(arg.vs, arg.v) },
-		func(arg TArg) int { return eeRatType.push(arg.vs, arg.v) },
-		func(arg TArg) int { return eeStringType.push(arg.vs, arg.v) },
+	eeReflectTypeFn(
+		et, pushStateType{vs, v, &i},
+		func(pushState interface{}) {
+			arg := pushState.(pushStateType)
+			*arg.i = arg.vs.pushAny(arg.v)
+		},
+		func(pushState interface{}) {
+			arg := pushState.(pushStateType)
+			*arg.i = eeBoolType.push(arg.vs, arg.v)
+		},
+		func(pushState interface{}) {
+			arg := pushState.(pushStateType)
+			*arg.i = eeFloat64Type.push(arg.vs, arg.v)
+		},
+		func(pushState interface{}) {
+			arg := pushState.(pushStateType)
+			*arg.i = eeInt64Type.push(arg.vs, arg.v)
+		},
+		func(pushState interface{}) {
+			arg := pushState.(pushStateType)
+			*arg.i = eeRatType.push(arg.vs, arg.v)
+		},
+		func(pushState interface{}) {
+			arg := pushState.(pushStateType)
+			*arg.i = eeStringType.push(arg.vs, arg.v)
+		},
 	)
+	return
 }
 
-func (et *eeReflectType) pushElem(vs *eeValues, ptr interface{}) int {
-	type TArg struct {
+func (et *eeReflectType) pushElem(vs *eeValues, ptr interface{}) (i int) {
+	type pushElemStateType struct {
 		vs  *eeValues
 		ptr interface{}
+		i   *int
 	}
-	return eeReflectTypeFn(
-		et, TArg{vs, ptr},
-		func(arg TArg) int { return arg.vs.pushAny(arg.vs) },
-		func(arg TArg) int { return eeBoolType.pushElem(arg.vs, arg.ptr) },
-		func(arg TArg) int { return eeFloat64Type.pushElem(arg.vs, arg.ptr) },
-		func(arg TArg) int { return eeInt64Type.pushElem(arg.vs, arg.ptr) },
-		func(arg TArg) int { return eeRatType.pushElem(arg.vs, arg.ptr) },
-		func(arg TArg) int { return eeStringType.pushElem(arg.vs, arg.ptr) },
+	eeReflectTypeFn(
+		et, pushElemStateType{vs, ptr, &i},
+		func(pushElemState interface{}) {
+			arg := pushElemState.(pushElemStateType)
+			*arg.i = arg.vs.pushAny(arg.vs)
+		},
+		func(pushElemState interface{}) {
+			arg := pushElemState.(pushElemStateType)
+			*arg.i = eeBoolType.pushElem(arg.vs, arg.ptr)
+		},
+		func(pushElemState interface{}) {
+			arg := pushElemState.(pushElemStateType)
+			*arg.i = eeFloat64Type.pushElem(arg.vs, arg.ptr)
+		},
+		func(pushElemState interface{}) {
+			arg := pushElemState.(pushElemStateType)
+			*arg.i = eeInt64Type.pushElem(arg.vs, arg.ptr)
+		},
+		func(pushElemState interface{}) {
+			arg := pushElemState.(pushElemStateType)
+			*arg.i = eeRatType.pushElem(arg.vs, arg.ptr)
+		},
+		func(pushElemState interface{}) {
+			arg := pushElemState.(pushElemStateType)
+			*arg.i = eeStringType.pushElem(arg.vs, arg.ptr)
+		},
 	)
+	return
 }
 
 func (et *eeReflectType) reflectType() reflect.Type { return et.rt }
 
 func (et *eeReflectType) sub(vs *eeValues) { et.call(et.subOrd, vs) }
 
-type eeBoolKindType[T ~bool] struct{ rt reflect.Type }
+type eeKindType struct{ rt reflect.Type }
 
-func (et eeBoolKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
+func (et eeKindType) fixType(v *interface{}) {
+	rv := reflect.ValueOf(*v)
+	rt := et.reflectType()
+	if rt == rv.Type() {
+		return
+	}
+	*v = rv.Convert(rt).Interface()
+}
+
+func (et eeKindType) reflectType() reflect.Type { return et.rt }
+
+type eeBoolKindType struct{ eeKindType }
+
+func (et eeBoolKindType) checkType(e Expr, t2 eeType) (eeType, error) {
 	if _, ok := e.(Not); ok {
 		if t2 != nil {
 			return nil, ErrInvalidType
@@ -605,53 +656,60 @@ func (et eeBoolKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
 	return et, nil
 }
 
-func (et eeBoolKindType[T]) cmp(vs *eeValues) int {
-	if et.eq(vs) {
-		return 0
-	}
-	return 1
-}
-
-func (et eeBoolKindType[T]) eq(vs *eeValues) bool {
+func (et eeBoolKindType) cmp(vs *eeValues) int {
 	a, _ := vs.popBool(), vs.popType()
 	b, _ := vs.popBool(), vs.popType()
-	return a == b
+	if a == b {
+		return 0
+	}
+	if a {
+		return 1
+	}
+	return -1
 }
 
-func (et eeBoolKindType[T]) get(vs *eeValues, i int) interface{} {
-	return T(vs.nums[i] != 0)
+func (et eeBoolKindType) eq(vs *eeValues) bool {
+	return et.cmp(vs) == 0
 }
 
-func (et eeBoolKindType[T]) kind() opKind { return opBool }
-
-func (et eeBoolKindType[T]) pop(vs *eeValues) interface{} {
-	return T(vs.popBool())
+func (et eeBoolKindType) get(vs *eeValues, i int) (v interface{}) {
+	v = vs.nums[i] != 0
+	et.fixType(&v)
+	return
 }
 
-func (et eeBoolKindType[T]) push(vs *eeValues, v interface{}) int {
-	return vs.pushBool(bool(v.(T)))
+func (et eeBoolKindType) kind() opKind { return opBool }
+
+func (et eeBoolKindType) pop(vs *eeValues) (v interface{}) {
+	v = vs.popBool()
+	et.fixType(&v)
+	return
 }
 
-func (et eeBoolKindType[T]) pushElem(vs *eeValues, ptr interface{}) int {
-	return vs.pushBool(bool(*(ptr.(*T))))
+func (et eeBoolKindType) push(vs *eeValues, v interface{}) int {
+	return vs.pushBool(reflect.ValueOf(v).Bool())
 }
 
-func (et eeBoolKindType[T]) reflectType() reflect.Type { return et.rt }
+func (et eeBoolKindType) pushElem(vs *eeValues, ptr interface{}) int {
+	return vs.pushBool(reflect.ValueOf(ptr).Elem().Bool())
+}
 
-type eeIntKindType[T ~int] struct{ rt reflect.Type }
+func (et eeBoolKindType) reflectType() reflect.Type { return et.rt }
+
+type eeIntKindType struct{ eeKindType }
 
 var _ interface {
 	eeType
 	eeNumType
-} = eeIntKindType[int]{}
+} = eeIntKindType{}
 
-func (et eeIntKindType[T]) add(vs *eeValues) {
+func (et eeIntKindType) add(vs *eeValues) {
 	a, _ := vs.popInt(), vs.popType()
 	b := vs.popInt()
 	vs.pushInt(a + b)
 }
 
-func (et eeIntKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
+func (et eeIntKindType) checkType(e Expr, t2 eeType) (eeType, error) {
 	if _, ok := e.(Not); !ok && et != t2 {
 		return nil, ErrInvalidType
 	}
@@ -664,43 +722,58 @@ func (et eeIntKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
 	return nil, ErrInvalidType
 }
 
-func (et eeIntKindType[T]) div(vs *eeValues) {
+func (et eeIntKindType) div(vs *eeValues) {
 	a, _ := vs.popInt(), vs.popType()
 	b := vs.popInt()
 	vs.pushInt(a / b)
 }
 
-func (et eeIntKindType[T]) eq(vs *eeValues) bool {
+func (et eeIntKindType) eq(vs *eeValues) bool {
 	a, _ := vs.popInt(), vs.popType()
 	b, _ := vs.popInt(), vs.popType()
 	return a == b
 }
 
-func (et eeIntKindType[T]) get(vs *eeValues, i int) interface{} { return T(vs.nums[i]) }
-func (et eeIntKindType[T]) kind() opKind                        { return opInt }
+func (et eeIntKindType) get(vs *eeValues, i int) (v interface{}) {
+	v = int(vs.nums[i])
+	et.fixType(&v)
+	return
+}
 
-func (et eeIntKindType[T]) mul(vs *eeValues) {
+func (et eeIntKindType) kind() opKind { return opInt }
+
+func (et eeIntKindType) mul(vs *eeValues) {
 	a, _ := vs.popInt(), vs.popType()
 	b := vs.popInt()
 	vs.pushInt(a * b)
 }
 
-func (et eeIntKindType[T]) pop(vs *eeValues) interface{}         { return T(vs.popInt()) }
-func (et eeIntKindType[T]) push(vs *eeValues, v interface{}) int { return vs.pushInt(int64(v.(T))) }
-func (et eeIntKindType[T]) pushElem(vs *eeValues, ptr interface{}) int {
-	return vs.pushInt(int64(*(ptr.(*T))))
+func (et eeIntKindType) pop(vs *eeValues) (v interface{}) {
+	v = vs.popInt()
+	et.fixType(&v)
+	return
 }
-func (et eeIntKindType[T]) reflectType() reflect.Type { return et.rt }
 
-func (et eeIntKindType[T]) sub(vs *eeValues) {
+func (et eeIntKindType) push(vs *eeValues, v interface{}) int {
+	return vs.pushInt(reflect.ValueOf(v).Int())
+}
+
+func (et eeIntKindType) pushElem(vs *eeValues, ptr interface{}) int {
+	if MoreUnsafe {
+		return vs.pushInt(*((*int64)(ifacePtrData(unsafe.Pointer(&ptr)).Data)))
+	}
+	return vs.pushInt(reflect.ValueOf(ptr).Elem().Int())
+}
+
+func (et eeIntKindType) sub(vs *eeValues) {
 	a, _ := vs.popInt(), vs.popType()
 	b := vs.popInt()
 	vs.pushInt(a - b)
 }
 
-type eeInt64KindType[T ~int64] struct{ rt reflect.Type }
+type eeInt64KindType struct{ eeKindType }
 
-func (et eeInt64KindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
+func (et eeInt64KindType) checkType(e Expr, t2 eeType) (eeType, error) {
 	if _, ok := e.(Not); ok {
 		if t2 != nil {
 			return nil, ErrInvalidType
@@ -730,7 +803,7 @@ func (et eeInt64KindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
 	return eeBoolType, nil
 }
 
-func (et eeInt64KindType[T]) cmp(vs *eeValues) int {
+func (et eeInt64KindType) cmp(vs *eeValues) int {
 	a, _ := vs.popInt(), vs.popType()
 	b, _ := vs.popInt(), vs.popType()
 	switch {
@@ -742,30 +815,46 @@ func (et eeInt64KindType[T]) cmp(vs *eeValues) int {
 	return -1
 }
 
-func (et eeInt64KindType[T]) eq(vs *eeValues) bool {
+func (et eeInt64KindType) eq(vs *eeValues) bool {
 	a, _ := vs.popInt(), vs.popType()
 	b, _ := vs.popInt(), vs.popType()
 	return a == b
 }
 
-func (et eeInt64KindType[T]) get(vs *eeValues, i int) interface{}  { return T(vs.nums[i]) }
-func (et eeInt64KindType[T]) kind() opKind                         { return opInt }
-func (et eeInt64KindType[T]) pop(vs *eeValues) interface{}         { return T(vs.popInt()) }
-func (et eeInt64KindType[T]) push(vs *eeValues, v interface{}) int { return vs.pushInt(int64(v.(T))) }
-func (et eeInt64KindType[T]) pushElem(vs *eeValues, ptr interface{}) int {
-	return vs.pushInt(int64(*(ptr.(*T))))
+func (et eeInt64KindType) get(vs *eeValues, i int) (v interface{}) {
+	v = vs.nums[i]
+	et.fixType(&v)
+	return
 }
-func (et eeInt64KindType[T]) reflectType() reflect.Type { return et.rt }
 
-type eeFloatKindType[T ~float64] struct{ rt reflect.Type }
+func (et eeInt64KindType) kind() opKind { return opInt }
 
-func (et eeFloatKindType[T]) add(vs *eeValues) {
+func (et eeInt64KindType) pop(vs *eeValues) (v interface{}) {
+	v = vs.popInt()
+	et.fixType(&v)
+	return
+}
+
+func (et eeInt64KindType) push(vs *eeValues, v interface{}) int {
+	return vs.pushInt(reflect.ValueOf(v).Int())
+}
+
+func (et eeInt64KindType) pushElem(vs *eeValues, ptr interface{}) int {
+	if MoreUnsafe {
+		return vs.pushInt(*((*int64)(ifacePtrData(unsafe.Pointer(&ptr)).Data)))
+	}
+	return vs.pushInt(reflect.ValueOf(ptr).Elem().Int())
+}
+
+type eeFloatKindType struct{ eeKindType }
+
+func (et eeFloatKindType) add(vs *eeValues) {
 	a, _ := vs.popFloat(), vs.popType()
 	b := vs.popFloat()
 	vs.pushFloat(a + b)
 }
 
-func (et eeFloatKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
+func (et eeFloatKindType) checkType(e Expr, t2 eeType) (eeType, error) {
 	if _, ok := e.(Not); ok {
 		if t2 != nil {
 			return nil, ErrInvalidType
@@ -793,7 +882,7 @@ func (et eeFloatKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
 	return eeBoolType, nil
 }
 
-func (et eeFloatKindType[T]) cmp(vs *eeValues) int {
+func (et eeFloatKindType) cmp(vs *eeValues) int {
 	a, _ := vs.popFloat(), vs.popType()
 	b, _ := vs.popFloat(), vs.popType()
 	switch {
@@ -806,48 +895,54 @@ func (et eeFloatKindType[T]) cmp(vs *eeValues) int {
 	return -1
 }
 
-func (et eeFloatKindType[T]) div(vs *eeValues) {
+func (et eeFloatKindType) div(vs *eeValues) {
 	a, _ := vs.popFloat(), vs.popType()
 	b := vs.popFloat()
 	vs.pushFloat(a / b)
 }
 
-func (et eeFloatKindType[T]) eq(vs *eeValues) bool {
+func (et eeFloatKindType) eq(vs *eeValues) bool {
 	a, _ := vs.popFloat(), vs.popType()
 	b, _ := vs.popFloat(), vs.popType()
 	return a == b
 }
 
-func (et eeFloatKindType[T]) get(vs *eeValues, i int) interface{} {
-	return *((*T)(unsafe.Pointer(&vs.nums[i])))
+func (et eeFloatKindType) get(vs *eeValues, i int) (v interface{}) {
+	v = *((*float64)(unsafe.Pointer(&vs.nums[i])))
+	et.fixType(&v)
+	return
 }
 
-func (et eeFloatKindType[T]) kind() opKind { return opFloat }
+func (et eeFloatKindType) kind() opKind { return opFloat }
 
-func (et eeFloatKindType[T]) mul(vs *eeValues) {
+func (et eeFloatKindType) mul(vs *eeValues) {
 	a, _ := vs.popFloat(), vs.popType()
 	b := vs.popFloat()
 	vs.pushFloat(a * b)
 }
 
-func (et eeFloatKindType[T]) pop(vs *eeValues) interface{} {
-	fs := (*[]T)(unsafe.Pointer(&vs.nums))
-	v := (*fs)[len(*fs)-1]
+func (et eeFloatKindType) pop(vs *eeValues) (v interface{}) {
+	fs := (*[]float64)(unsafe.Pointer(&vs.nums))
+	v = (*fs)[len(*fs)-1]
 	*fs = (*fs)[:len(*fs)-1]
-	return v
+	et.fixType(&v)
+	return
 }
 
-func (et eeFloatKindType[T]) push(vs *eeValues, v interface{}) int {
-	return vs.pushFloat(float64(v.(T)))
+func (et eeFloatKindType) push(vs *eeValues, v interface{}) int {
+	return vs.pushFloat(reflect.ValueOf(v).Float())
 }
 
-func (et eeFloatKindType[T]) pushElem(vs *eeValues, ptr interface{}) int {
-	return vs.pushFloat(float64(*(ptr.(*T))))
+func (et eeFloatKindType) pushElem(vs *eeValues, ptr interface{}) int {
+	if MoreUnsafe {
+		return vs.pushFloat(*((*float64)(ifacePtrData(unsafe.Pointer(&ptr)).Data)))
+	}
+	return vs.pushFloat(reflect.ValueOf(ptr).Elem().Float())
 }
 
-func (et eeFloatKindType[T]) reflectType() reflect.Type { return et.rt }
+func (et eeFloatKindType) reflectType() reflect.Type { return et.rt }
 
-func (et eeFloatKindType[T]) sub(vs *eeValues) {
+func (et eeFloatKindType) sub(vs *eeValues) {
 	a, _ := vs.popFloat(), vs.popType()
 	b := vs.popFloat()
 	vs.pushFloat(a - b)
@@ -952,21 +1047,21 @@ func (et eeRatKindType) sub(vs *eeValues) {
 	vs.pushRat(a.Sub(a, b))
 }
 
-type eeStringKindType[T ~string] struct{ rt reflect.Type }
+type eeStringKindType struct{ eeKindType }
 
 var _ interface {
 	eeType
 	eeAddType
 	eeCmpType
-} = eeStringKindType[string]{}
+} = eeStringKindType{}
 
-func (et eeStringKindType[T]) add(vs *eeValues) {
+func (et eeStringKindType) add(vs *eeValues) {
 	a, _ := vs.popStr(), vs.popType()
 	b := vs.popStr() // leave 2nd type
 	vs.pushStr(a + b)
 }
 
-func (et eeStringKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
+func (et eeStringKindType) checkType(e Expr, t2 eeType) (eeType, error) {
 	if t2 != et {
 		return nil, ErrInvalidType
 	}
@@ -988,38 +1083,58 @@ func (et eeStringKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
 	return eeBoolType, nil
 }
 
-func (et eeStringKindType[T]) cmp(vs *eeValues) int {
+func (et eeStringKindType) cmp(vs *eeValues) int {
 	a, _ := vs.popStr(), vs.popType()
 	b, _ := vs.popStr(), vs.popType()
 	return strings.Compare(a, b)
 }
 
-func (et eeStringKindType[T]) eq(vs *eeValues) bool {
+func (et eeStringKindType) eq(vs *eeValues) bool {
 	a, _ := vs.popStr(), vs.popType()
 	b, _ := vs.popStr(), vs.popType()
 	return a == b
 }
 
-func (et eeStringKindType[T]) get(vs *eeValues, i int) interface{}  { return T(vs.strs[i]) }
-func (et eeStringKindType[T]) kind() opKind                         { return opStr }
-func (et eeStringKindType[T]) pop(vs *eeValues) interface{}         { return T(vs.popStr()) }
-func (et eeStringKindType[T]) push(vs *eeValues, v interface{}) int { return vs.pushStr(string(v.(T))) }
-func (et eeStringKindType[T]) pushElem(vs *eeValues, ptr interface{}) int {
-	return vs.pushStr(string(*(ptr.(*T))))
+func (et eeStringKindType) get(vs *eeValues, i int) (v interface{}) {
+	v = vs.strs[i]
+	et.fixType(&v)
+	return
 }
-func (et eeStringKindType[T]) reflectType() reflect.Type { return et.rt }
 
-type eeMapStrAnyKindType[T ~string] struct {
+func (et eeStringKindType) kind() opKind { return opStr }
+
+func (et eeStringKindType) pop(vs *eeValues) (v interface{}) {
+	v = vs.popStr()
+	et.fixType(&v)
+	return
+}
+
+func (et eeStringKindType) push(vs *eeValues, v interface{}) (i int) {
+	if MoreUnsafe {
+		return vs.pushStr(*((*string)(ifacePtrData(unsafe.Pointer(&v)).Data)))
+	}
+	return vs.pushStr(reflect.ValueOf(v).String())
+}
+
+func (et eeStringKindType) pushElem(vs *eeValues, ptr interface{}) int {
+	if MoreUnsafe {
+		return vs.pushStr(*((*string)(ifacePtrData(unsafe.Pointer(&ptr)).Data)))
+	}
+	return vs.pushStr(reflect.ValueOf(ptr).Elem().String())
+}
+func (et eeStringKindType) reflectType() reflect.Type { return et.rt }
+
+type eeMapKindType struct {
 	eeReflectType
-	keyType eeStringKindType[T]
+	keyType eeStringKindType
 }
 
 var _ interface {
 	eeType
 	eeMemType
-} = (*eeMapStrAnyKindType[string])(nil)
+} = (*eeMapKindType)(nil)
 
-func (et *eeMapStrAnyKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
+func (et *eeMapKindType) checkType(e Expr, t2 eeType) (eeType, error) {
 	switch e.(type) {
 	case Mem:
 		if et.keyType != t2 {
@@ -1030,29 +1145,25 @@ func (et *eeMapStrAnyKindType[T]) checkType(e Expr, t2 eeType) (eeType, error) {
 	return et.eeReflectType.checkType(e, t2)
 }
 
-func (et *eeMapStrAnyKindType[T]) getMem(vs *eeValues) {
-	m, _ := et.popMap(vs), vs.popType()
-	k, _ := T(vs.popStr()), vs.popType()
-	v := m[k]
+func (et *eeMapKindType) getMem(vs *eeValues) {
+	m := reflect.ValueOf(vs.popType().pop(vs))
+	k := reflect.ValueOf(vs.popType().pop(vs))
+	v := m.MapIndex(k).Interface()
 	vt := typeOf(v)
 	vt.push(vs, v)
 	vs.pushType(vt)
 }
 
-func (et *eeMapStrAnyKindType[T]) kind() opKind { return opAny }
+func (et *eeMapKindType) kind() opKind { return opAny }
 
-func (et *eeMapStrAnyKindType[T]) popMap(vs *eeValues) map[T]interface{} {
-	return vs.popAny().(map[T]interface{})
+func (et *eeMapKindType) setMem(vs *eeValues) {
+	m := reflect.ValueOf(vs.popType().pop(vs))
+	k := reflect.ValueOf(vs.popType().pop(vs))
+	v := reflect.ValueOf(vs.popType().pop(vs))
+	m.SetMapIndex(k, v)
 }
 
-func (et *eeMapStrAnyKindType[T]) setMem(vs *eeValues) {
-	m, _ := et.popMap(vs), vs.popType()
-	k, _ := T(vs.popStr()), vs.popType()
-	v := vs.popType().pop(vs)
-	m[k] = v
-}
-
-type eeSliceKindType[TSlice ~[]TElem, TElem any] struct {
+type eeSliceKindType struct {
 	eeAnyKindType
 	rt reflect.Type
 	et eeType
@@ -1061,9 +1172,9 @@ type eeSliceKindType[TSlice ~[]TElem, TElem any] struct {
 var _ interface {
 	eeType
 	eeMemType
-} = (*eeSliceKindType[[]interface{}, any])(nil)
+} = (*eeSliceKindType)(nil)
 
-func (et *eeSliceKindType[TSlice, TElem]) checkType(e Expr, t2 eeType) (eeType, error) {
+func (et *eeSliceKindType) checkType(e Expr, t2 eeType) (eeType, error) {
 	switch e.(type) {
 	case Mem:
 		if t2.kind() != opInt {
@@ -1074,18 +1185,18 @@ func (et *eeSliceKindType[TSlice, TElem]) checkType(e Expr, t2 eeType) (eeType, 
 	return et.eeAnyKindType.checkType(e, t2)
 }
 
-func (et *eeSliceKindType[TSlice, TElem]) getMem(vs *eeValues) {
-	sl := vs.popType().pop(vs).(TSlice)
+func (et *eeSliceKindType) getMem(vs *eeValues) {
+	sl := reflect.ValueOf(vs.popType().pop(vs))
 	i, _ := vs.popInt(), vs.popType()
-	et.et.push(vs, sl[i])
+	et.et.push(vs, sl.Index(int(i)).Interface())
 	vs.pushType(et.et)
 }
 
-func (et *eeSliceKindType[TSlice, TElem]) setMem(vs *eeValues) {
-	sl := vs.popType().pop(vs).(TSlice)
+func (et *eeSliceKindType) setMem(vs *eeValues) {
+	sl := reflect.ValueOf(vs.popType().pop(vs))
 	i, _ := vs.popInt(), vs.popType()
-	v := vs.popType().pop(vs).(TElem)
-	sl[i] = v
+	v := reflect.ValueOf(vs.popType().pop(vs))
+	sl.Index(int(i)).Set(v)
 }
 
 func eeCmp(vs *eeValues) int {
@@ -1099,11 +1210,6 @@ func eeCmp(vs *eeValues) int {
 			return -ct.cmp(vs)
 		}
 	}
-	// TODO: if the value 2nd from the top implements eeCmpType,
-	// swap the two operands to perform the comparison.
-	// if len(vs.types) > 1 {
-	// 	et = vs.types[len(vs.types)-2]
-	// }
 	if et.eq(vs) {
 		return 0
 	}
