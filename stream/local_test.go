@@ -54,7 +54,7 @@ func TestStream(t *testing.T) {
 			defer logging.TestingHandler(
 				logging.GetLogger(
 					path.Join(expr.PkgName, "stream"),
-					logging.LoggerTemporary,
+					logging.LoggerTemporary(),
 					logging.LoggerPropagate(true),
 					logging.LoggerLevel(logging.EverythingLevel),
 				),

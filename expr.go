@@ -204,28 +204,11 @@ func (x Div) appendString(sb *strings.Builder) { appendBinary(sb, "/", x) }
 // Mem selects a member of a source expression.
 type Mem [2]Expr
 
-var mems sync.Map // map[reflect.Type][]reflect.StructField
+var mems sync.Map // map[reflect.Type]*[]reflect.StructField
 
-func MemOf(e Expr, base, field interface{}) Mem {
-	getPtr := func(v interface{}) (rv reflect.Value, p uintptr) {
-		rv = reflect.ValueOf(v)
-		if !rv.IsValid() {
-			panic("MemOf: base or field is invalid")
-		}
-		if rv.Kind() != reflect.Ptr {
-			panic(fmt.Sprintf(
-				"MemOf: base and field must be pointer, not %T",
-				base,
-			))
-		}
-		if rv.IsNil() {
-			panic("MemOf: base or field is nil")
-		}
-		p = rv.Pointer()
-		return
-	}
+func ReflectStructFieldsOfType(rt reflect.Type) []reflect.StructField {
 	getStructFields := func(t reflect.Type) *[]reflect.StructField {
-		k := interface{}(t)
+		k := (interface{})(t)
 		v, loaded := mems.Load(k)
 		if loaded {
 			return v.(*[]reflect.StructField)
@@ -245,23 +228,51 @@ func MemOf(e Expr, base, field interface{}) Mem {
 		}
 		return offs
 	}
+	return *getStructFields(rt)
+}
+
+// ReflectStructFieldOf takes a pointer to a struct and a pointer to
+// a field within the struct to get that field's `*reflect.StructField`.
+// This `*reflect.StructField` is cached, so do not mutate it.
+func ReflectStructFieldOf(base, field interface{}) (sf *reflect.StructField) {
+	getPtr := func(v interface{}) (rv reflect.Value, p uintptr) {
+		rv = reflect.ValueOf(v)
+		if !rv.IsValid() {
+			panic("MemOf: base or field is invalid")
+		}
+		if rv.Kind() != reflect.Ptr {
+			panic(fmt.Sprintf(
+				"MemOf: base and field must be pointer, not %T",
+				base,
+			))
+		}
+		if rv.IsNil() {
+			panic("MemOf: base or field is nil")
+		}
+		p = rv.Pointer()
+		return
+	}
 	bv, bp := getPtr(base)
 	fv, fp := getPtr(field)
 	ft := fv.Elem().Type()
-	foff := fp - bp
-	structFields := *getStructFields(bv.Type().Elem())
+	offset := fp - bp
+	structFields := ReflectStructFieldsOfType(bv.Type().Elem())
 	// TODO: Maybe binary search would be better, but I'm assuming tiny
 	// numbers of fields for now:
 	for i := range structFields {
 		sf := &structFields[i]
-		if sf.Offset == foff && sf.Type == ft {
-			return Mem{e, sf}
+		if sf.Offset == offset && sf.Type == ft {
+			return sf
 		}
 	}
 	panic(fmt.Errorf(
 		"unknown %T field at offset %d in %T",
-		field, foff, base,
+		field, offset, base,
 	))
+}
+
+func MemOf(e Expr, base, field interface{}) Mem {
+	return Mem{e, ReflectStructFieldOf(base, field)}
 }
 
 func (x Mem) Operands() [2]Expr { return ([2]Expr)(x) }
@@ -484,7 +495,7 @@ func EachVarValue(ctx context.Context, vs Values, f func(Var, interface{}) error
 func MakeVarValueSlice(ctx context.Context, vs Values) ([]VarValue, error) {
 	const arbitraryCapacity = 8
 	length := arbitraryCapacity
-	if vsLen, ok := tryLenOK(vs); ok {
+	if vsLen, err := tryLen(vs, 1); err == nil {
 		length = vsLen
 	}
 	vvs := make([]VarValue, length)
@@ -502,84 +513,56 @@ func MakeVarValueSlice(ctx context.Context, vs Values) ([]VarValue, error) {
 	return vvs, nil
 }
 
-// tryLenOK and tryLenErr attempt to get the length of _something_.
-// tryLenOK doesn't waste resources building an error if the value
-// doesn't have a concept of length.  tryLenErr will report an error
-// message if the value doesn't have a length.
-var tryLenOK, _ = func() (func(v interface{}) (int, bool), func(v interface{}) (int, error)) {
-	type tryLenErr int
-	const (
-		ok tryLenErr = iota
-		lenErr
-		nilPtr
-		badType
-		tooDeep
-	)
-	var tryLenImpl func(v interface{}, depth int) (int, tryLenErr, error)
-	tryLenImpl = func(v interface{}, depth int) (int, tryLenErr, error) {
-		switch v := v.(type) {
-		case interface{ Len() int }:
-			return v.Len(), ok, nil
-		case interface{ Len() (int, error) }:
-			n, err := v.Len()
-			return n, lenErr, err
-		default:
-			rv := reflect.ValueOf(v)
-			if !rv.IsValid() {
-				return 0, nilPtr, nil
-			}
-			switch rv.Kind() {
-			case reflect.Ptr:
-				if depth > 0 {
-					return 0, tooDeep, nil
-				}
-				if rv.IsNil() {
-					return 0, nilPtr, nil
-				}
-				rv = rv.Elem()
-				if !rv.CanInterface() {
-					return 0, badType, nil
-				}
-				return tryLenImpl(rv.Interface(), depth+1)
-			case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
-				return rv.Len(), ok, nil
-			}
-			return 0, badType, nil
-		}
+var (
+	errNilPtr         = errors.New("pointer is nil")
+	errInvalidValue   = errors.New("value is invalid")
+	errRecursionLimit = errors.New("max recursion limit reached")
+)
+
+// tryLen attempts to get the length of _something_.
+func tryLen(v interface{}, maxPtrDepth int) (length int, err error) {
+	if maxPtrDepth < 0 {
+		return 0, errRecursionLimit
 	}
-	return func(v interface{}) (int, bool) {
-			length, tryErr, _ := tryLenImpl(v, 0)
-			if tryErr != ok {
-				return 0, false
-			}
-			return length, true
-		}, func(v interface{}) (int, error) {
-			length, tryErr, err := tryLenImpl(v, 0)
-			if err != nil {
-				return 0, err
-			}
-			switch tryErr {
-			case ok:
-				return length, nil
-			case lenErr:
-				return 0, err
-			case nilPtr:
-				return 0, fmt.Errorf(
-					"%w: cannot get length of nil pointer",
-					ErrInvalidType,
-				)
-			case badType:
-				return 0, fmt.Errorf("%w: %T", ErrInvalidType, v)
-			case tooDeep:
-				return 0, fmt.Errorf(
-					"%w: cannot get length of pointer to "+
-						"pointer: %[2]v (type: %[2]T)",
-					ErrInvalidType, v,
-				)
-			}
-			panic(fmt.Errorf("unhandled switch case: %v", tryErr))
+	switch v := v.(type) {
+	case interface{ Len() int }:
+		return v.Len(), nil
+	case interface{ Len() int64 }:
+		return int(v.Len()), nil
+	case interface{ Len() int32 }:
+		return int(v.Len()), nil
+	case interface{ Len() int16 }:
+		return int(v.Len()), nil
+	case interface{ Len() int8 }:
+		return int(v.Len()), nil
+	case interface{ Len() uint64 }:
+		return int(v.Len()), nil
+	case interface{ Len() uint32 }:
+		return int(v.Len()), nil
+	case interface{ Len() uint16 }:
+		return int(v.Len()), nil
+	case interface{ Len() uint8 }:
+		return int(v.Len()), nil
+	}
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return 0, errNilPtr
+	}
+	switch rv.Kind() {
+	case reflect.Ptr:
+		if rv.IsNil() {
+			return 0, errNilPtr
 		}
-}()
+		rv = rv.Elem()
+		if !rv.CanInterface() {
+			return 0, errInvalidValue
+		}
+		return tryLen(rv.Interface(), maxPtrDepth-1)
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return rv.Len(), nil
+	}
+	return 0, errInvalidValue
+}
 
 // VarValueIterOf creates a VarValueIter from the values.  If the Values'
 // Vars function already returns a VarValueIter implementation, that
