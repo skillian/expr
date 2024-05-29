@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"reflect"
 
 	"github.com/skillian/expr"
@@ -17,14 +18,14 @@ type localStreamer struct {
 
 type localFilterer localStreamer
 
-func NewLocalFilterer(ctx context.Context, sr Streamer, e expr.Expr) (Streamer, error) {
+func NewLocalFilterer(ctx context.Context, sr Streamer, e expr.Expr) Streamer {
 	if srcFr, ok := sr.(localFilterer); ok {
 		return localFilterer{
 			source: srcFr.source,
 			e:      expr.And{srcFr.e, e},
-		}, nil
+		}
 	}
-	return localFilterer{sr, e}, nil
+	return localFilterer{sr, e}
 }
 
 func (fr localFilterer) Stream(ctx context.Context) (Stream, error) {
@@ -61,6 +62,10 @@ type localStream struct {
 type localFilter struct {
 	localStream
 	nexter func(*localFilter, context.Context) error
+}
+
+func (f *localFilter) Close(ctx context.Context) error {
+	return closeStream(ctx, f.source)
 }
 
 func (f *localFilter) Next(ctx context.Context) error { return f.nexter(f, ctx) }
@@ -140,8 +145,8 @@ func (f localFilter) Var() expr.Var { return f.source.Var() }
 
 type localMapper localStreamer
 
-func NewLocalMapper(ctx context.Context, sr Streamer, e expr.Expr) (Streamer, error) {
-	return &localMapper{sr, e}, nil
+func NewLocalMapper(ctx context.Context, sr Streamer, e expr.Expr) Streamer {
+	return &localMapper{sr, e}
 }
 
 func (mr *localMapper) Stream(ctx context.Context) (Stream, error) {
@@ -165,6 +170,10 @@ type localMap struct {
 	localStream
 	va     expr.Var
 	nexter func(*localMap, context.Context) error
+}
+
+func (m *localMap) Close(ctx context.Context) error {
+	return closeStream(ctx, m.source)
 }
 
 func (m *localMap) Next(ctx context.Context) error { return m.nexter(m, ctx) }
@@ -236,8 +245,8 @@ type localJoiner struct {
 }
 
 // NewLocalJoiner performs a join operation within the current process.
-func NewLocalJoiner(ctx context.Context, bigger, smaller Streamer, when, then expr.Expr) (Streamer, error) {
-	return &localJoiner{bigger, smaller, when, then}, nil
+func NewLocalJoiner(ctx context.Context, bigger, smaller Streamer, when, then expr.Expr) Streamer {
+	return &localJoiner{bigger, smaller, when, then}
 }
 
 type localJoin struct {
@@ -280,6 +289,23 @@ func (j *localJoiner) Stream(ctx context.Context) (Stream, error) {
 }
 
 func (j localJoiner) Var() expr.Var { return j }
+
+func (j *localJoin) Close(ctx context.Context) error {
+	errs := make([]error, 0, 2)
+	if err := closeStream(ctx, j.bigger); err != nil {
+		errs = append(errs, err)
+	}
+	if err := closeStream(ctx, j.smaller); err != nil {
+		errs = append(errs, err)
+	}
+	switch len(errs) {
+	case 0:
+		return nil
+	case 1:
+		return errs[0]
+	}
+	return errors.Join(errs...)
+}
 
 func (j *localJoin) Next(ctx context.Context) error {
 	return j.nexter(j, ctx)
@@ -448,6 +474,67 @@ func (j *localJoin) String() string {
 	)
 }
 
+type localLimiter struct {
+	source Streamer
+	limit  big.Int
+}
+
+var _ Streamer = (*localLimiter)(nil)
+
+func (lr *localLimiter) Stream(ctx context.Context) (Stream, error) {
+	s, err := lr.source.Stream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &localLimit{
+		source:  s,
+		limiter: lr,
+	}, nil
+}
+
+func (lr *localLimiter) Var() expr.Var { return lr.source.Var() }
+
+type localLimit struct {
+	source  Stream
+	count   big.Int
+	limiter *localLimiter
+}
+
+var _ Stream = (*localLimit)(nil)
+
+var bigInts = func() (ints [2]big.Int) {
+	for i := range ints[:] {
+		ints[i].SetInt64(int64(i))
+	}
+	return
+}()
+
+func (lim *localLimit) Close(ctx context.Context) error {
+	return closeStream(ctx, lim.source)
+}
+
+func (lim *localLimit) Next(ctx context.Context) error {
+	if lim.count.Cmp(&lim.limiter.limit) >= 0 {
+		if err := closeStream(ctx, lim.source); err != nil {
+			return errors.Join(
+				fmt.Errorf(
+					"attempting to close stream "+
+						"after reaching limit: %w",
+					err,
+				),
+				io.EOF,
+			)
+		}
+		return io.EOF
+	}
+	lim.count.Add(&lim.count, &bigInts[1])
+	return lim.source.Next(ctx)
+}
+
+func (lim *localLimit) Var() expr.Var { return lim.source.Var() }
+
+// closeStream attempts to close a stream if the stream implements
+// a Close() or Close(context.Context) method.
 func closeStream(ctx context.Context, s Stream) error {
 	switch s := s.(type) {
 	case io.Closer:

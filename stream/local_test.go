@@ -23,16 +23,16 @@ var streamTests = []streamTest{
 	{"filterMap", func(ctx context.Context, t *testing.T) stream.Streamer {
 		t.Helper()
 		sr := stream.Streamer(stream.FromSlice([]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}))
-		sr = mustStreamer(stream.Filter(ctx, sr, expr.Gt{sr.Var(), 5}))
-		return mustStreamer(stream.Map(ctx, sr, expr.Mul{sr.Var(), 2}))
+		sr = stream.Filter(ctx, sr, expr.Gt{sr.Var(), 5})
+		return stream.Map(ctx, sr, expr.Mul{sr.Var(), 2})
 	}, []interface{}{12, 14, 16, 18}, ""},
 	{"filterMapJoin", func(ctx context.Context, t *testing.T) stream.Streamer {
 		t.Helper()
 		sr := stream.Streamer(stream.FromSlice([]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}))
-		sr = mustStreamer(stream.Filter(ctx, sr, expr.Gt{sr.Var(), 5}))
-		sr = mustStreamer(stream.Map(ctx, sr, expr.Mul{sr.Var(), 2}))
+		sr = stream.Filter(ctx, sr, expr.Gt{sr.Var(), 5})
+		sr = stream.Map(ctx, sr, expr.Mul{sr.Var(), 2})
 		sr2 := stream.Streamer(stream.FromSlice([]string{"a", "b"}))
-		return mustStreamer(stream.Join(ctx, sr, sr2, true, expr.Tuple{sr.Var(), sr2.Var()}))
+		return stream.Join(ctx, sr, sr2, true, expr.Tuple{sr.Var(), sr2.Var()})
 	}, []interface{}{
 		expr.Tuple{12, "a"},
 		expr.Tuple{12, "b"},
@@ -80,11 +80,4 @@ func TestStream(t *testing.T) {
 			}
 		})
 	}
-}
-
-func mustStreamer(sr stream.Streamer, err error) stream.Streamer {
-	if err != nil {
-		panic(err)
-	}
-	return sr
 }
