@@ -33,10 +33,10 @@ func Each(
 		state interface{}
 		f     EachFunc
 	}
-	err = expr.WithEvalContext(ctx, eachStateType{sr, state, f}, func(
+	err = expr.WithEvalContext(ctx, &eachStateType{sr, state, f}, func(
 		ctx context.Context, state2 interface{},
 	) (err error) {
-		eachState := state2.(eachStateType)
+		eachState := state2.(*eachStateType)
 		sr, state, f := eachState.sr, eachState.state, eachState.f
 		ctx, vs := expr.GetOrAddValuesToContext(ctx)
 		s, err := sr.Stream(ctx)

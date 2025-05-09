@@ -132,13 +132,26 @@ func (ee *exprEvaluator) eval(ctx context.Context) error {
 	var vsOK bool
 	// TODO: Instead of returning ErrInvalidType for currently
 	// unsupported built-in operands, dispatch to the eeType.
+opCodeLoop:
 	for {
 		var op opCode
 		var extraOps []opCode
 		{
 			ff := ee.ff(0)
-			if ff.pc >= len(ff.fn.ops) {
-				break
+			cmp := ff.pc - len(ff.fn.ops)
+			switch {
+			case cmp > 0:
+				logger.Warn4(
+					"%v at stack frame %v "+
+						"PC is at %d, "+
+						"but only has "+
+						"%v opcodes",
+					ee, len(ee.callStack),
+					ff.pc, len(ff.fn.ops),
+				)
+				fallthrough
+			case cmp == 0:
+				break opCodeLoop
 			}
 			op = ff.fn.ops[ff.pc]
 			ff.pc++
@@ -148,9 +161,6 @@ func (ee *exprEvaluator) eval(ctx context.Context) error {
 				ff.pc += extra
 			}
 		}
-		// TODO: Read up on jump tables in Go.  For now, we're
-		// filling the ops densely to hopefully make it easy
-		// for the compiler.
 		switch op {
 		case opNop:
 			continue

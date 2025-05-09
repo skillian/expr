@@ -18,6 +18,23 @@ type eeValues struct {
 	strs  []string
 }
 
+func quickSimpleEEValues() *eeValues {
+	const arbitrary = 4
+	type simpleEEValues struct {
+		eeValues
+		types [2 * arbitrary]eeType
+		anys  [arbitrary]interface{}
+		nums  [arbitrary]int64
+		strs  [arbitrary]string
+	}
+	sev := &simpleEEValues{}
+	sev.eeValues.types = sev.types[:0]
+	sev.eeValues.anys = sev.anys[:0]
+	sev.eeValues.nums = sev.nums[:0]
+	sev.eeValues.strs = sev.strs[:0]
+	return &sev.eeValues
+}
+
 // init initializes the eeValues' "substacks" with the given
 // capacity.
 func (vs *eeValues) init(capacity int) {
@@ -144,25 +161,37 @@ func (vs *eeValues) pushType(v eeType) int {
 }
 
 func (vs *eeValues) reset() {
-	for i := range vs.types {
-		vs.types[i] = nil
+	{
+		types := vs.types[:cap(vs.types)]
+		for i := range types {
+			types[i] = nil
+		}
+		vs.types = types[:0]
 	}
-	vs.types = vs.types[:0]
-	for i := range vs.anys {
-		vs.anys[i] = nil
+	{
+		anys := vs.anys[:cap(vs.anys)]
+		for i := range anys {
+			anys[i] = nil
+		}
+		vs.anys = anys[:0]
 	}
-	vs.anys = vs.anys[:0]
 	// Clearing numbers too, even though they don't reference
 	// memory to reduce the chance of leaking information to
 	// subsequent users of the exprEvaluator.
-	for i := range vs.nums {
-		vs.nums[i] = 0
+	{
+		nums := vs.nums[:cap(vs.nums)]
+		for i := range nums {
+			nums[i] = 0
+		}
+		vs.nums = nums[:0]
 	}
-	vs.nums = vs.nums[:0]
-	for i := range vs.strs {
-		vs.strs[i] = ""
+	{
+		strs := vs.strs[:cap(vs.strs)]
+		for i := range strs {
+			strs[i] = ""
+		}
+		vs.strs = strs[:0]
 	}
-	vs.strs = vs.strs[:0]
 }
 
 type eeValueKey struct {

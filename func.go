@@ -186,20 +186,18 @@ func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) e
 // reset the function builder before it is put back into the pool.
 func (b *exprFuncBuilder) reset() {
 	b.ee.reset()
-	if len(b.stack) > 0 {
-		visited := make(map[*efbStackFrame]struct{})
-		for i, ef := range b.stack {
-			ef.walk(func(fr *efbStackFrame) {
-				visited[fr] = struct{}{}
-			})
-			b.stack[i] = nil
+	visited := make(map[*efbStackFrame]struct{})
+	for i, ef := range b.stack {
+		ef.walk(func(fr *efbStackFrame) {
+			visited[fr] = struct{}{}
+		})
+		b.stack[i] = nil
+	}
+	for ef := range visited {
+		if ef == nil {
+			continue
 		}
-		for ef := range visited {
-			if ef == nil {
-				continue
-			}
-			b.putFrame(ef)
-		}
+		b.putFrame(ef)
 	}
 	b.stack = b.stack[:0]
 	b.stack = append(b.stack, b.getFrame())
@@ -698,12 +696,12 @@ func (f *opFunc) opDasmAppendTo(sb *strings.Builder, pc int, indent string) erro
 		op := f.ops[i]
 		sb.WriteString(indent)
 		sb.WriteString(strconv.Itoa(i))
-		opLength := op.length()
-		i += opLength
 		sb.WriteByte('\t')
 		if i == pc {
 			sb.WriteString("->")
 		}
+		opLength := op.length()
+		i += opLength
 		sb.WriteByte('\t')
 		sb.WriteString(op.String())
 		switch op {
@@ -737,13 +735,10 @@ var _ interface {
 } = (*opFunc)(nil)
 
 func (f *opFunc) Call(ctx context.Context, vs Values) (res interface{}, err error) {
-	type callStateType struct {
-		res *interface{}
-	}
-	err = WithEvalContext(ctx, callStateType{&res}, func(
+	err = WithEvalContext(ctx, &res, func(
 		ctx context.Context, state interface{},
 	) (err error) {
-		p := state.(callStateType).res
+		p := state.(*interface{})
 		ee := ctxutil.Value(ctx, exprEvaluatorContextKey()).(*exprEvaluator)
 		*p, err = ee.evalFunc(ctx, f, vs)
 		return

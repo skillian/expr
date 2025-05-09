@@ -8,10 +8,10 @@ import (
 	"math/bits"
 	"reflect"
 	"strings"
-	"sync"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/logging"
+	"github.com/skillian/unsafereflect"
 )
 
 const (
@@ -25,14 +25,13 @@ const (
 	MoreUnsafe = true
 )
 
-var (
-	logger = logging.GetLogger(PkgName)
-)
-
 // Expr is a basic expression
 type Expr interface{}
 
-var exprType = reflect.TypeOf((*Expr)(nil)).Elem()
+var (
+	exprType = reflect.TypeOf((*Expr)(nil)).Elem()
+	logger   = logging.GetLogger(PkgName)
+)
 
 // Tuple is a finite ordered sequence of expressions.
 type Tuple []Expr
@@ -41,13 +40,11 @@ func (t Tuple) Eq(t2 Tuple) bool {
 	if len(t) != len(t2) {
 		return false
 	}
-	var vs eeValues
+	vs := quickSimpleEEValues()
 	for i, x := range t {
 		vs.push(t2[i])
-		et := typeOf(x)
-		et.push(&vs, x)
-		vs.pushType(et)
-		if !et.eq(&vs) {
+		vs.push(x)
+		if !vs.peekType().eq(vs) {
 			return false
 		}
 	}
@@ -204,31 +201,8 @@ func (x Div) appendString(sb *strings.Builder) { appendBinary(sb, "/", x) }
 // Mem selects a member of a source expression.
 type Mem [2]Expr
 
-var mems sync.Map // map[reflect.Type]*[]reflect.StructField
-
 func ReflectStructFieldsOfType(rt reflect.Type) []reflect.StructField {
-	getStructFields := func(t reflect.Type) *[]reflect.StructField {
-		k := (interface{})(t)
-		v, loaded := mems.Load(k)
-		if loaded {
-			return v.(*[]reflect.StructField)
-		}
-		offs := new([]reflect.StructField)
-		*offs = make([]reflect.StructField, 0, t.NumField())
-		for i := 0; i < cap(*offs); i++ {
-			f := t.Field(i)
-			if f.Type.Size() == 0 {
-				continue
-			}
-			*offs = append(*offs, f)
-		}
-		v, loaded = mems.LoadOrStore(k, offs)
-		if loaded {
-			return v.(*[]reflect.StructField)
-		}
-		return offs
-	}
-	return *getStructFields(rt)
+	return unsafereflect.TypeFromReflectType(rt).ReflectStructFields()
 }
 
 // ReflectStructFieldOf takes a pointer to a struct and a pointer to
@@ -290,6 +264,11 @@ type Var interface {
 	Var() Var
 }
 
+type NamedVar interface {
+	Var
+	Name() string
+}
+
 // Values is an ordered mapping of Vars to their values.
 type Values interface {
 	// Get the value associated with the given variable.
@@ -317,7 +296,7 @@ func ValuesFromContextOK(ctx context.Context) (vs Values, ok bool) {
 }
 
 var errNoValuesInContext = fmt.Errorf(
-	"%w: failed to get values from context",
+	"expr.Values %w in context",
 	ErrNotFound,
 )
 
@@ -670,7 +649,17 @@ func (f VisitFunc) Visit(ctx context.Context, e Expr) (Visitor, error) {
 	return f(ctx, e)
 }
 
-func Walk(ctx context.Context, e Expr, v Visitor, options ...WalkOption) error {
+var errNilExpr = errors.New("nil expression")
+
+func Walk(ctx context.Context, e Expr, v Visitor, options ...WalkOption) (err error) {
+	defer func() {
+		if err != nil {
+			err = errors.ErrorfWithCause(err, "expr.Walk: %v", err)
+		}
+	}()
+	if e == nil {
+		return errNilExpr
+	}
 	var cfg walkConfig
 	for _, opt := range options {
 		opt(&cfg)
