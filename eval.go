@@ -121,15 +121,13 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (in
 		fn: f,
 		pc: 0,
 	})
-	if err := ee.eval(ctx); err != nil {
+	if err := ee.eval(ctx, vs); err != nil {
 		return nil, err
 	}
 	return ee.popType().pop(&ee.eeValues), nil
 }
 
-func (ee *exprEvaluator) eval(ctx context.Context) error {
-	var vs Values
-	var vsOK bool
+func (ee *exprEvaluator) eval(ctx context.Context, vs Values) (evalErr error) {
 	// TODO: Instead of returning ErrInvalidType for currently
 	// unsupported built-in operands, dispatch to the eeType.
 opCodeLoop:
@@ -182,14 +180,15 @@ opCodeLoop:
 			ee.pushStr(*(ee.popType().pop(&ee.eeValues).(*string)))
 			ee.pushType(eeStringType)
 		case opLdv:
-			v, _ := ee.popAny(), ee.popType()
-			if !vsOK {
-				if vs, vsOK = ValuesFromContextOK(ctx); !vsOK {
+			//v, _ := ee.popAny(), ee.popType()
+			v := ee.popType().pop(&ee.eeValues)
+			if vs == nil || vs == NoValues() {
+				if vs, evalErr = ValuesFromContext(ctx); evalErr != nil {
 					return ee.wrapError(
 						"failed to get values "+
 							"from context"+
 							": %w",
-						ErrInvalidType,
+						evalErr,
 					)
 				}
 			}
@@ -448,10 +447,10 @@ opCodeLoop:
 			b := ee.popRat()
 			ee.pushRat((&big.Rat{}).Quo(a, b))
 		case opLdmAnyAny:
-			v, _, _ := ee.popAny(), ee.popType(), ee.popType()
+			v, vt, _ := ee.popAny(), ee.popType(), ee.popType()
 			switch m := ee.popAny().(type) {
 			case *reflect.StructField:
-				v = reflect.ValueOf(v).Elem().FieldByIndex(m.Index).Addr().Interface()
+				v = vt.unsafereflectType().FieldPointer(v, m.Index[0])
 			default:
 				return fmt.Errorf(
 					"%[1]w: Unexpected member: %[2]v (type: %[2]T) of %[3]v (%[3]T)",
@@ -465,7 +464,7 @@ opCodeLoop:
 			m := reflect.ValueOf(
 				ee.popType().pop(&ee.eeValues),
 			).Convert(
-				mapStrAnyType,
+				mapStrAnyType.ReflectType(),
 			).Interface().(map[string]interface{})
 			k, _ := ee.popStr(), ee.popType()
 			v := m[k]

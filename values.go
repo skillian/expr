@@ -1,10 +1,10 @@
 package expr
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/big"
 	"math/bits"
-	"reflect"
 	"unsafe"
 )
 
@@ -199,7 +199,7 @@ type eeValueKey struct {
 }
 
 const (
-	eeValueKeyTypeBits = (bits.UintSize / 2) + 2
+	eeValueKeyTypeBits = (bits.UintSize / 2)
 	eeValueKeyTypeMask = (1 << eeValueKeyTypeBits) - 1
 
 	eeValueKeyValIndexBits = bits.UintSize - eeValueKeyTypeBits
@@ -225,14 +225,36 @@ func makeEEValueKey(typeIndex, valueIndex int) eeValueKey {
 	}
 }
 
+var getUint, setUint, uintBytes = func() (func([]byte) uint, func([]byte, uint), int) {
+	switch bits.UintSize {
+	case 32:
+		uint32_ := binary.NativeEndian.Uint32
+		setUint32 := binary.NativeEndian.PutUint32
+		return func(b []byte) uint {
+				return uint(uint32_(b))
+			}, func(b []byte, u uint) {
+				setUint32(b, uint32(u))
+			}, 4
+	case 64:
+		uint64_ := binary.NativeEndian.Uint64
+		setUint64 := binary.NativeEndian.PutUint64
+		return func(b []byte) uint {
+				return uint(uint64_(b))
+			}, func(b []byte, u uint) {
+				setUint64(b, uint64(u))
+			}, 8
+	default:
+		panic(fmt.Errorf("unknown uint size: %v", bits.UintSize))
+	}
+}()
+
 func eeValueKeyFromOpCodes(ops []opCode) (k eeValueKey, n int) {
-	bs := opCodesBytes(ops)
-	k.data = *((*uint)(unsafe.Pointer(&bs[0])))
-	return k, int(unsafe.Sizeof(uint(0)))
+	k.data = getUint(opCodesBytes(ops))
+	return k, len(ops)
 }
 
 func (vk eeValueKey) appendToOpCodes(ops []opCode) []opCode {
-	return opCodesFromBytes(appendValBitsToBytes(opCodesBytes(ops), vk.data))
+	return appendUintToOpcodes(ops, vk.data)
 }
 
 func (vk eeValueKey) typeAndValueIndexes() (typeIndex, valueIndex int) {
@@ -240,26 +262,14 @@ func (vk eeValueKey) typeAndValueIndexes() (typeIndex, valueIndex int) {
 		int(vk.data>>eeValueKeyTypeBits) & eeValueKeyValIndexMask
 }
 
-func appendValBitsToBytes(bs []byte, v interface{}) []byte {
-	rv := reflect.ValueOf(v)
-	rv2 := reflect.New(rv.Type())
-	rv2.Elem().Set(rv)
-	return appendPtrToValBitsToBytes(bs, rv2.Interface())
-}
-
-func valBytes(v interface{}) (vBytes []byte) {
-	rv := reflect.ValueOf(v)
-	rt := rv.Type()
-	if rt.Kind() != reflect.Pointer {
-		panic("must be pointer")
+func appendUintToOpcodes(ops []opCode, u uint) []opCode {
+	bs := opCodesBytes(ops)
+	if cap(bs)-len(bs) < uintBytes {
+		bs2 := make([]byte, len(bs), 1<<bits.Len(uint(cap(bs)+uintBytes)))
+		copy(bs2, bs)
+		bs = bs2
 	}
-	vbsh := (*reflect.SliceHeader)(unsafe.Pointer(&vBytes))
-	vbsh.Data = rv.Pointer()
-	vbsh.Cap = int(rt.Size())
-	vbsh.Len = vbsh.Cap
-	return
-}
-
-func appendPtrToValBitsToBytes(bs []byte, v interface{}) []byte {
-	return append(bs, valBytes(v)...)
+	bs = bs[:len(bs)+uintBytes]
+	setUint(bs[len(bs)-uintBytes:], u)
+	return opCodesFromBytes(bs)
 }

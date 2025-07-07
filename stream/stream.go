@@ -12,7 +12,8 @@ import (
 )
 
 // Streamer is a source from which streams of values can be created.
-// Stream may be called concurrently.
+// Stream may be called and the returned Stream object can be used
+// concurrently.
 type Streamer interface {
 	Stream(context.Context) (Stream, error)
 

@@ -46,7 +46,7 @@ var streamTests = []streamTest{
 }
 
 func TestStream(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 	for i := range streamTests {
 		tc := &streamTests[i]
 		t.Run(tc.name, func(t *testing.T) {

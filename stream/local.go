@@ -7,8 +7,10 @@ import (
 	"io"
 	"math/big"
 	"reflect"
+	"unsafe"
 
 	"github.com/skillian/expr"
+	"github.com/skillian/unsafereflect"
 )
 
 type localStreamer struct {
@@ -545,6 +547,8 @@ func closeStream(ctx context.Context, s Stream) error {
 	return nil
 }
 
+// resetStream attempts to reset the stream so that it can be iterated
+// over again.
 func resetStream(ctx context.Context, s Stream) error {
 	switch s := s.(type) {
 	case interface{ Reset() error }:
@@ -555,54 +559,64 @@ func resetStream(ctx context.Context, s Stream) error {
 	return expr.ErrInvalidType
 }
 
-// slice wraps a slice of anything.
 type slice struct {
-	rv reflect.Value
+	t      *unsafereflect.Type
+	start  unsafe.Pointer
+	length int
 }
 
-// FromSlice creates a streamer from a slice of anything.
-func FromSlice(vs interface{}) Streamer {
-	rv := reflect.ValueOf(vs)
-	if rv.Kind() != reflect.Slice {
+var empty = &slice{unsafereflect.TypeOf(struct{}{}), nil, 0}
+
+// Empty returns an empty streamer
+func Empty() Streamer { return empty }
+
+func FromSlice(s interface{}) Streamer {
+	t := unsafereflect.TypeOf(s)
+	if t.ReflectType().Kind() != reflect.Slice {
 		panic(fmt.Sprintf(
-			"%[1]v (type: %[1]T) is not a slice",
-			vs,
+			"FromSlice requires its parameter to be a slice, not %T",
+			s,
 		))
 	}
-	return &slice{rv}
+	length := unsafereflect.Len(s)
+	if length == 0 {
+		return Empty()
+	}
+	return &slice{
+		t:      t,
+		start:  unsafereflect.SliceDataOf(unsafereflect.InterfaceDataOf(unsafe.Pointer(&s)).Data).Data,
+		length: length,
+	}
 }
 
-var _ interface {
-	Streamer
-} = (*slice)(nil)
+func (sl *slice) Stream(context.Context) (Stream, error) {
+	return &sliceStream{sl, 0}, nil
+}
 
-func (sl *slice) Stream(ctx context.Context) (Stream, error) {
-	return &sliceStream{sl.rv, sl.Var()}, nil
+func (sl *slice) slice() interface{} {
+	return reflect.SliceAt(sl.t.ReflectType().Elem(), sl.start, sl.length).Interface()
 }
 
 func (sl *slice) Var() expr.Var { return sl }
 
 type sliceStream struct {
-	rv reflect.Value
-	va expr.Var
+	slice *slice
+	index int
 }
 
-var _ interface {
-	Stream
-} = (*sliceStream)(nil)
-
 func (ss *sliceStream) Next(ctx context.Context) error {
-	length := ss.rv.Len()
-	if length == 0 {
+	if ss.index >= ss.slice.length {
 		return io.EOF
 	}
 	vs, err := expr.ValuesFromContext(ctx)
 	if err != nil {
 		return err
 	}
-	v := ss.rv.Index(0).Interface()
-	ss.rv = ss.rv.Slice(1, length)
-	return vs.Set(ctx, ss.va, v)
+	ss.index++
+	return vs.Set(ctx, ss.Var(), ss.slice.t.UnsafeFieldValue(
+		ss.slice.slice(),
+		ss.index-1,
+	))
 }
 
-func (ss *sliceStream) Var() expr.Var { return ss.va }
+func (ss *sliceStream) Var() expr.Var { return ss.slice.Var() }

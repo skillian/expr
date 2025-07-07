@@ -37,12 +37,12 @@ func (x Call) Operands() []Expr { return ([]Expr)(x) }
 
 func (x Call) String() string { return buildString(x) }
 
-func (x Call) appendString(sb *strings.Builder) {
+func (x Call) writeStringToStringBuilder(sb *strings.Builder) {
 	sb.WriteByte('(')
-	appendString(sb, x[0])
+	writeStringToStringBuilder(sb, x[0])
 	for _, sub := range x[1:] {
 		sb.WriteByte(' ')
-		appendString(sb, sub)
+		writeStringToStringBuilder(sb, sub)
 	}
 	sb.WriteByte(')')
 }
@@ -177,7 +177,7 @@ func (b *exprFuncBuilder) initVarTypes(ctx context.Context, e Expr, vs Values) e
 				va, vs, err,
 			)
 		}
-		b.vartypes[va] = getVarType(typeOf(v).reflectType()).(*eeVarKindType)
+		b.vartypes[va] = getVarType(typeOf(v).unsafereflectType().ReflectType()).(*eeVarKindType)
 		return vi, nil
 	})
 	return Walk(ctx, e, vi)
@@ -247,7 +247,7 @@ func (b *exprFuncBuilder) Visit(ctx context.Context, e Expr) (Visitor, error) {
 		return b, nil
 	case opPackTuple:
 		top.codes = append(top.codes, opPackTuple)
-		top.codes = opCodesFromBytes(appendValBitsToBytes(opCodesBytes(top.codes), len(top.opers)))
+		top.codes = appendUintToOpcodes(top.codes, uint(len(top.opers)))
 		top.t = typeOf(Tuple(nil))
 		return b, nil
 	}
@@ -257,11 +257,11 @@ func (b *exprFuncBuilder) Visit(ctx context.Context, e Expr) (Visitor, error) {
 	}
 	top.codes = append(top.codes, op)
 	_, topIsMem := e.(Mem)
-	isMapMem := topIsMem && top.opers[1].t.reflectType().Kind() == reflect.Map
+	isMapMem := topIsMem && top.opers[1].t.unsafereflectType().ReflectType().Kind() == reflect.Map
 	_, secIsMem := sec.e.(Mem)
 	switch {
-	case topIsMem && secIsMem && t.reflectType().Kind() != reflect.Ptr:
-		top.t = getType(reflect.PtrTo(t.reflectType()))
+	case topIsMem && secIsMem && t.unsafereflectType().ReflectType().Kind() != reflect.Ptr:
+		top.t = getType(reflect.PointerTo(t.unsafereflectType().ReflectType()))
 	case topIsMem && !isMapMem:
 		// TODO: deref something other than Any?
 		top.codes = append(top.codes, opDerefAny)
@@ -364,8 +364,8 @@ func (b *exprFuncBuilder) tryPromoteNumTypes(fr *efbStackFrame) error {
 	if op == opNop {
 		return fmt.Errorf(
 			"%w: Cannot promote %v to %v or vice-versa",
-			ErrInvalidType, reflectTypeName(left.t.reflectType()),
-			reflectTypeName(right.t.reflectType()),
+			ErrInvalidType, reflectTypeName(left.t.unsafereflectType().ReflectType()),
+			reflectTypeName(right.t.unsafereflectType().ReflectType()),
 		)
 	}
 	promoteFrame := fr.opers[operIndex]
@@ -711,7 +711,7 @@ func (f *opFunc) opDasmAppendTo(sb *strings.Builder, pc int, indent string) erro
 			ti, vi := vk.typeAndValueIndexes()
 			v := f.consts.types[ti].get(&f.consts, vi)
 			sb.WriteString(fmt.Sprintf("%#[1]v", v))
-		case opBrt:
+		case opBrt, opPackTuple:
 			sb.WriteByte(' ')
 			i := *((*int)(unsafe.Pointer(&f.ops[i-(opLength-1)])))
 			sb.WriteString(strconv.Itoa(i))
@@ -735,12 +735,17 @@ var _ interface {
 } = (*opFunc)(nil)
 
 func (f *opFunc) Call(ctx context.Context, vs Values) (res interface{}, err error) {
-	err = WithEvalContext(ctx, &res, func(
-		ctx context.Context, state interface{},
+	type stateType struct {
+		f   *opFunc
+		vs  Values
+		res *interface{}
+	}
+	err = WithEvalContext(ctx, &stateType{f, vs, &res}, func(
+		ctx context.Context, anyState interface{},
 	) (err error) {
-		p := state.(*interface{})
+		state := anyState.(*stateType)
 		ee := ctxutil.Value(ctx, exprEvaluatorContextKey()).(*exprEvaluator)
-		*p, err = ee.evalFunc(ctx, f, vs)
+		*state.res, err = ee.evalFunc(ctx, state.f, state.vs)
 		return
 	})
 	return
@@ -797,8 +802,25 @@ func (fc *funcCache) loadOrStore(k funcKey, f Func) (actual Func, loaded bool) {
 type funcKey interface{}
 
 func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
-	var appendExpr func(exprs []Expr, e Expr) []Expr
-	appendExpr = func(exprs []Expr, e Expr) []Expr {
+	var appendExpr func(ctx context.Context, exprs []Expr, e Expr, vs Values) []Expr
+	appendExpr = func(ctx context.Context, exprs []Expr, e Expr, vs Values) []Expr {
+		if va, ok := e.(Var); ok {
+			v, err := vs.Get(ctx, va)
+			if err != nil {
+				logger.Error1(
+					"getting %v",
+					va,
+				)
+			} else {
+				e, ok = v.(Expr)
+				if !ok {
+					logger.Error2(
+						"%[1]v (type: %[1]T) does not implement %[2]v",
+						v, reflect.TypeOf(&e).Elem().Name(),
+					)
+				}
+			}
+		}
 		rv := reflect.ValueOf(e)
 		switch rv.Kind() {
 		case reflect.Func:
@@ -808,8 +830,8 @@ func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
 			exprs = append(exprs, rv.Len())
 			mr := rv.MapRange()
 			for mr.Next() {
-				exprs = appendExpr(exprs, mr.Key().Interface())
-				exprs = appendExpr(exprs, mr.Value().Interface())
+				exprs = appendExpr(ctx, exprs, mr.Key().Interface(), vs)
+				exprs = appendExpr(ctx, exprs, mr.Value().Interface(), vs)
 			}
 			return exprs
 		case reflect.Slice:
@@ -817,7 +839,7 @@ func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
 			length := rv.Len()
 			exprs = append(exprs, length)
 			for i := 0; i < length; i++ {
-				exprs = appendExpr(exprs, rv.Index(i).Interface())
+				exprs = appendExpr(ctx, exprs, rv.Index(i).Interface(), vs)
 			}
 			return exprs
 		}
@@ -832,13 +854,13 @@ func makeFuncKey(ctx context.Context, e Expr, vs Values) funcKey {
 		}
 		switch e := e.(type) {
 		case Tuple:
-			exprs = appendExpr(exprs, e)
+			exprs = appendExpr(ctx, exprs, e, vs)
 		case Unary, Binary, interface{ Operands() []Expr }:
 			e2 := reflect.Zero(reflect.TypeOf(e)).Interface().(Expr)
 			exprs = append(exprs, e2)
 			return v, nil
 		default:
-			exprs = appendExpr(exprs, e)
+			exprs = appendExpr(ctx, exprs, e, vs)
 		}
 		return nil, nil
 	})

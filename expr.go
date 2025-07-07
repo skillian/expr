@@ -36,6 +36,10 @@ var (
 // Tuple is a finite ordered sequence of expressions.
 type Tuple []Expr
 
+func MakeTuple(length int) Tuple {
+	return make(Tuple, length)
+}
+
 func (t Tuple) Eq(t2 Tuple) bool {
 	if len(t) != len(t2) {
 		return false
@@ -66,9 +70,9 @@ func (x Not) Operand() Expr { return x[0] }
 
 func (x Not) String() string { return buildString(x) }
 
-func (x Not) appendString(sb *strings.Builder) {
+func (x Not) writeStringToStringBuilder(sb *strings.Builder) {
 	sb.WriteString("(not ")
-	appendString(sb, x[0])
+	writeStringToStringBuilder(sb, x[0])
 	sb.WriteByte(')')
 }
 
@@ -85,7 +89,7 @@ func (x Eq) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Eq) String() string { return buildString(x) }
 
-func (x Eq) appendString(sb *strings.Builder) { appendBinary(sb, "eq", x) }
+func (x Eq) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "eq", x) }
 
 // Ne checks for inequality (i.e. a != b)
 type Ne [2]Expr
@@ -94,7 +98,7 @@ func (x Ne) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Ne) String() string { return buildString(x) }
 
-func (x Ne) appendString(sb *strings.Builder) { appendBinary(sb, "ne", x) }
+func (x Ne) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "ne", x) }
 
 // Gt checks if the first operand is greater than the second (i.e. a > b)
 type Gt [2]Expr
@@ -103,7 +107,7 @@ func (x Gt) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Gt) String() string { return buildString(x) }
 
-func (x Gt) appendString(sb *strings.Builder) { appendBinary(sb, "gt", x) }
+func (x Gt) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "gt", x) }
 
 // Ge checks if the first operand is greater than or equal to the second
 // (i.e. a >= b)
@@ -113,7 +117,7 @@ func (x Ge) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Ge) String() string { return buildString(x) }
 
-func (x Ge) appendString(sb *strings.Builder) { appendBinary(sb, "ge", x) }
+func (x Ge) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "ge", x) }
 
 // Lt checks if the first operand is greater than the second (i.e. a < b)
 type Lt [2]Expr
@@ -122,7 +126,7 @@ func (x Lt) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Lt) String() string { return buildString(x) }
 
-func (x Lt) appendString(sb *strings.Builder) { appendBinary(sb, "lt", x) }
+func (x Lt) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "lt", x) }
 
 // Le checks if the first operand is less than or equal to the second
 // (i.e. a <= b)
@@ -132,7 +136,7 @@ func (x Le) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Le) String() string { return buildString(x) }
 
-func (x Le) appendString(sb *strings.Builder) { appendBinary(sb, "le", x) }
+func (x Le) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "le", x) }
 
 // And performs a boolean AND operation of its two operands.
 //
@@ -146,7 +150,7 @@ func (x And) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x And) String() string { return buildString(x) }
 
-func (x And) appendString(sb *strings.Builder) { appendBinary(sb, "and", x) }
+func (x And) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "and", x) }
 
 // Or performs a boolean OR operation of its two operands.
 //
@@ -160,7 +164,7 @@ func (x Or) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Or) String() string { return buildString(x) }
 
-func (x Or) appendString(sb *strings.Builder) { appendBinary(sb, "or", x) }
+func (x Or) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "or", x) }
 
 // Add performs an arithmetic addition of its two operands (i.e. a + b)
 type Add [2]Expr
@@ -169,7 +173,7 @@ func (x Add) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Add) String() string { return buildString(x) }
 
-func (x Add) appendString(sb *strings.Builder) { appendBinary(sb, "+", x) }
+func (x Add) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "+", x) }
 
 // Sub performs an arithmetic addition of its two operands (i.e. a - b)
 type Sub [2]Expr
@@ -178,7 +182,7 @@ func (x Sub) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Sub) String() string { return buildString(x) }
 
-func (x Sub) appendString(sb *strings.Builder) { appendBinary(sb, "-", x) }
+func (x Sub) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "-", x) }
 
 // Mul performs an arithmetic addition of its two operands (i.e. a * b)
 type Mul [2]Expr
@@ -187,7 +191,7 @@ func (x Mul) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Mul) String() string { return buildString(x) }
 
-func (x Mul) appendString(sb *strings.Builder) { appendBinary(sb, "*", x) }
+func (x Mul) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "*", x) }
 
 // Div performs an arithmetic addition of its two operands (i.e. a /+ b)
 type Div [2]Expr
@@ -196,7 +200,7 @@ func (x Div) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Div) String() string { return buildString(x) }
 
-func (x Div) appendString(sb *strings.Builder) { appendBinary(sb, "/", x) }
+func (x Div) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "/", x) }
 
 // Mem selects a member of a source expression.
 type Mem [2]Expr
@@ -253,7 +257,7 @@ func (x Mem) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Mem) String() string { return buildString(x) }
 
-func (x Mem) appendString(sb *strings.Builder) { appendBinary(sb, ".", x) }
+func (x Mem) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, ".", x) }
 
 // Var is a placeholder for a runtime-determined value in an expression.
 type Var interface {
@@ -268,6 +272,11 @@ type NamedVar interface {
 	Var
 	Name() string
 }
+
+type Ident string
+
+func (n Ident) Var() Var     { return n }
+func (n Ident) Name() string { return string(n) }
 
 // Values is an ordered mapping of Vars to their values.
 type Values interface {
@@ -343,8 +352,7 @@ type VarValueIter interface {
 // valueList is an implementation of Values that keeps its keys
 // and values in slices that are scanned sequentially.
 type valueList struct {
-	keys []Var
-	vals []interface{}
+	varValues []VarValue
 }
 
 var _ interface {
@@ -360,15 +368,7 @@ type VarValue struct {
 // NewValues creates Values from a sequence of Vars and their values.
 func NewValues(ps ...VarValue) Values {
 	_, capacity := minMaxInt(1<<bits.Len(uint(len(ps))), 4)
-	vs := &valueList{
-		keys: make([]Var, len(ps), capacity),
-		vals: make([]interface{}, len(ps), capacity),
-	}
-	for i, p := range ps {
-		vs.keys[i] = p.Var
-		vs.vals[i] = p.Value
-	}
-	return vs
+	return &valueList{append(make([]VarValue, 0, capacity), ps...)}
 }
 
 // ErrNotFound indicates something wasn't found; it should be wrapped
@@ -376,23 +376,22 @@ func NewValues(ps ...VarValue) Values {
 var ErrNotFound = errors.New("not found")
 
 func (vs *valueList) Get(ctx context.Context, v Var) (interface{}, error) {
-	for i, k := range vs.keys {
-		if k == v {
-			return vs.vals[i], nil
+	for i := range vs.varValues {
+		if vs.varValues[i].Var == v {
+			return vs.varValues[i].Value, nil
 		}
 	}
 	return nil, ErrNotFound
 }
 
 func (vs *valueList) Set(ctx context.Context, v Var, x interface{}) error {
-	for i, k := range vs.keys {
-		if k == v {
-			vs.vals[i] = x
+	for i := range vs.varValues {
+		if vs.varValues[i].Var == v {
+			vs.varValues[i].Value = x
 			return nil
 		}
 	}
-	vs.keys = append(vs.keys, v)
-	vs.vals = append(vs.vals, x)
+	vs.varValues = append(vs.varValues, VarValue{v, x})
 	return nil
 }
 
@@ -404,7 +403,7 @@ type valueListIter struct {
 func (vs *valueList) Vars() VarIter { return &valueListIter{vs, 0} }
 
 func (vli *valueListIter) Next(context.Context) error {
-	if vli.i >= len(vli.vs.keys) {
+	if vli.i >= len(vli.vs.varValues) {
 		return io.EOF
 	}
 	vli.i++
@@ -416,15 +415,13 @@ func (vli *valueListIter) Reset(context.Context) error {
 	return nil
 }
 
+// Var is not meant to make this type implement the Var interface.
 func (vli *valueListIter) Var() Var {
-	return vli.vs.keys[vli.i-1]
+	return vli.vs.varValues[vli.i-1].Var
 }
 
 func (vli *valueListIter) VarValue(context.Context) VarValue {
-	return VarValue{
-		Var:   vli.vs.keys[vli.i-1],
-		Value: vli.vs.vals[vli.i-1],
-	}
+	return vli.vs.varValues[vli.i-1]
 }
 
 type noValues struct{}
@@ -564,14 +561,14 @@ func (vvi varValueIter) VarValue(ctx context.Context) VarValue {
 
 func buildString(x interface{}) string {
 	sb := strings.Builder{}
-	appendString(&sb, x)
+	writeStringToStringBuilder(&sb, x)
 	return sb.String()
 }
 
-func appendString(sb *strings.Builder, x interface{}) {
+func writeStringToStringBuilder(sb *strings.Builder, x interface{}) {
 	switch x := x.(type) {
-	case interface{ appendString(sb *strings.Builder) }:
-		x.appendString(sb)
+	case interface{ writeStringToStringBuilder(sb *strings.Builder) }:
+		x.writeStringToStringBuilder(sb)
 	default:
 		sb.WriteString(fmt.Sprint(x))
 	}
@@ -582,9 +579,9 @@ func appendBinary(sb *strings.Builder, op string, b Binary) {
 	sb.WriteByte('(')
 	sb.WriteString(op)
 	sb.WriteByte(' ')
-	appendString(sb, ops[0])
+	writeStringToStringBuilder(sb, ops[0])
 	sb.WriteByte(' ')
-	appendString(sb, ops[1])
+	writeStringToStringBuilder(sb, ops[1])
 	sb.WriteByte(')')
 }
 
@@ -654,7 +651,7 @@ var errNilExpr = errors.New("nil expression")
 func Walk(ctx context.Context, e Expr, v Visitor, options ...WalkOption) (err error) {
 	defer func() {
 		if err != nil {
-			err = errors.ErrorfWithCause(err, "expr.Walk: %v", err)
+			err = fmt.Errorf("expr.Walk: %v: %w", e, err)
 		}
 	}()
 	if e == nil {
