@@ -18,5 +18,7 @@ require (
 	github.com/skillian/ctxutil v0.0.0-00010101000000-000000000000
 	github.com/skillian/errors v0.0.0-20220412220440-9e3e39f14923
 	github.com/skillian/logging v0.0.0-20220617155357-42fdd303775d
-	github.com/skillian/unsafereflect v0.0.0-00010101000000-000000000000
+	github.com/skillian/unsafereflect v0.0.0-20250707184903-b53a81dd1551
 )
+
+require golang.org/x/sys v0.34.0 // indirect

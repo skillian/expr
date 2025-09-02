@@ -570,13 +570,19 @@ var empty = &slice{unsafereflect.TypeOf(struct{}{}), nil, 0}
 // Empty returns an empty streamer
 func Empty() Streamer { return empty }
 
+// FromSlice creates a stream from a slice of values.  If s is not a
+// slice, then it is wrapped as if it were []interface{}{s}
 func FromSlice(s interface{}) Streamer {
 	t := unsafereflect.TypeOf(s)
+	base := unsafereflect.InterfaceDataOf(unsafe.Pointer(&s)).Data
 	if t.ReflectType().Kind() != reflect.Slice {
-		panic(fmt.Sprintf(
-			"FromSlice requires its parameter to be a slice, not %T",
-			s,
-		))
+		return &slice{
+			t: unsafereflect.TypeFromReflectType(
+				reflect.SliceOf(t.ReflectType()),
+			),
+			start:  base,
+			length: 1,
+		}
 	}
 	length := unsafereflect.Len(s)
 	if length == 0 {
@@ -584,7 +590,7 @@ func FromSlice(s interface{}) Streamer {
 	}
 	return &slice{
 		t:      t,
-		start:  unsafereflect.SliceDataOf(unsafereflect.InterfaceDataOf(unsafe.Pointer(&s)).Data).Data,
+		start:  unsafereflect.SliceDataOf(base).Data,
 		length: length,
 	}
 }

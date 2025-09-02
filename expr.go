@@ -152,6 +152,21 @@ func (x And) String() string { return buildString(x) }
 
 func (x And) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "and", x) }
 
+// All creates an expression that checks if es[0] AND es[1] AND es[n]
+func All(es ...Expr) Expr {
+	switch len(es) {
+	case 0:
+		return nil
+	case 1:
+		return es[0]
+	}
+	and := es[0]
+	for _, e := range es[1:] {
+		and = And{and, e}
+	}
+	return and
+}
+
 // Or performs a boolean OR operation of its two operands.
 //
 //	false || false == false
@@ -165,6 +180,21 @@ func (x Or) Operands() [2]Expr { return ([2]Expr)(x) }
 func (x Or) String() string { return buildString(x) }
 
 func (x Or) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "or", x) }
+
+// Any creates an expression that checks if es[0] OR es[1] OR es[n]
+func Any(es ...Expr) Expr {
+	switch len(es) {
+	case 0:
+		return nil
+	case 1:
+		return es[0]
+	}
+	or := es[0]
+	for _, e := range es[1:] {
+		or = Or{or, e}
+	}
+	return or
+}
 
 // Add performs an arithmetic addition of its two operands (i.e. a + b)
 type Add [2]Expr
@@ -332,8 +362,8 @@ func GetOrAddValuesToContext(ctx context.Context) (context.Context, Values) {
 // Values from the context.
 func ValuesContextKey() interface{} { return (*Values)(nil) }
 
-// VarIter is a variable iterator.  Next must be called before Var to retrieve
-// a valid Var.
+// VarIter is a variable iterator.  Next must be called before Var to
+// retrieve a valid Var.
 type VarIter interface {
 	// Next retrieves the next Var from the VarIter.
 	Next(context.Context) error
@@ -353,6 +383,7 @@ type VarValueIter interface {
 // and values in slices that are scanned sequentially.
 type valueList struct {
 	varValues []VarValue
+	nextIndex int
 }
 
 var _ interface {
@@ -368,7 +399,15 @@ type VarValue struct {
 // NewValues creates Values from a sequence of Vars and their values.
 func NewValues(ps ...VarValue) Values {
 	_, capacity := minMaxInt(1<<bits.Len(uint(len(ps))), 4)
-	return &valueList{append(make([]VarValue, 0, capacity), ps...)}
+	ps2 := make([]VarValue, len(ps), capacity)
+	copy(ps2, ps)
+	return ValuesOfVarValues(ps2)
+}
+
+// ValuesOfVarValues treats a slice of VarValues as a Values
+// implementation.
+func ValuesOfVarValues(varValues []VarValue) Values {
+	return &valueList{varValues: varValues}
 }
 
 // ErrNotFound indicates something wasn't found; it should be wrapped
@@ -376,16 +415,22 @@ func NewValues(ps ...VarValue) Values {
 var ErrNotFound = errors.New("not found")
 
 func (vs *valueList) Get(ctx context.Context, v Var) (interface{}, error) {
-	for i := range vs.varValues {
-		if vs.varValues[i].Var == v {
-			return vs.varValues[i].Value, nil
+	for i, varValues := range [][]VarValue{
+		vs.varValues[vs.nextIndex:],
+		vs.varValues[:vs.nextIndex],
+	} {
+		for j := range varValues {
+			if varValues[j].Var == v {
+				vs.nextIndex = ((1 - i) * vs.nextIndex) + j
+				return varValues[j].Value, nil
+			}
 		}
 	}
 	return nil, ErrNotFound
 }
 
 func (vs *valueList) Set(ctx context.Context, v Var, x interface{}) error {
-	for i := range vs.varValues {
+	for i := len(vs.varValues) - 1; i >= 0; i-- {
 		if vs.varValues[i].Var == v {
 			vs.varValues[i].Value = x
 			return nil
