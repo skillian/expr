@@ -121,24 +121,35 @@ func (ee *exprEvaluator) evalFunc(ctx context.Context, f *opFunc, vs Values) (in
 		fn: f,
 		pc: 0,
 	})
-	if err := ee.eval(ctx); err != nil {
+	if err := ee.eval(ctx, vs); err != nil {
 		return nil, err
 	}
 	return ee.popType().pop(&ee.eeValues), nil
 }
 
-func (ee *exprEvaluator) eval(ctx context.Context) error {
-	var vs Values
-	var vsOK bool
+func (ee *exprEvaluator) eval(ctx context.Context, vs Values) (evalErr error) {
 	// TODO: Instead of returning ErrInvalidType for currently
 	// unsupported built-in operands, dispatch to the eeType.
+opCodeLoop:
 	for {
 		var op opCode
 		var extraOps []opCode
 		{
 			ff := ee.ff(0)
-			if ff.pc >= len(ff.fn.ops) {
-				break
+			cmp := ff.pc - len(ff.fn.ops)
+			switch {
+			case cmp > 0:
+				logger.Warn4(
+					"%v at stack frame %v "+
+						"PC is at %d, "+
+						"but only has "+
+						"%v opcodes",
+					ee, len(ee.callStack),
+					ff.pc, len(ff.fn.ops),
+				)
+				fallthrough
+			case cmp == 0:
+				break opCodeLoop
 			}
 			op = ff.fn.ops[ff.pc]
 			ff.pc++
@@ -148,9 +159,6 @@ func (ee *exprEvaluator) eval(ctx context.Context) error {
 				ff.pc += extra
 			}
 		}
-		// TODO: Read up on jump tables in Go.  For now, we're
-		// filling the ops densely to hopefully make it easy
-		// for the compiler.
 		switch op {
 		case opNop:
 			continue
@@ -172,14 +180,15 @@ func (ee *exprEvaluator) eval(ctx context.Context) error {
 			ee.pushStr(*(ee.popType().pop(&ee.eeValues).(*string)))
 			ee.pushType(eeStringType)
 		case opLdv:
-			v, _ := ee.popAny(), ee.popType()
-			if !vsOK {
-				if vs, vsOK = ValuesFromContextOK(ctx); !vsOK {
+			//v, _ := ee.popAny(), ee.popType()
+			v := ee.popType().pop(&ee.eeValues)
+			if vs == nil || vs == NoValues() {
+				if vs, evalErr = ValuesFromContext(ctx); evalErr != nil {
 					return ee.wrapError(
 						"failed to get values "+
 							"from context"+
 							": %w",
-						ErrInvalidType,
+						evalErr,
 					)
 				}
 			}
@@ -438,10 +447,10 @@ func (ee *exprEvaluator) eval(ctx context.Context) error {
 			b := ee.popRat()
 			ee.pushRat((&big.Rat{}).Quo(a, b))
 		case opLdmAnyAny:
-			v, _, _ := ee.popAny(), ee.popType(), ee.popType()
+			v, vt, _ := ee.popAny(), ee.popType(), ee.popType()
 			switch m := ee.popAny().(type) {
 			case *reflect.StructField:
-				v = reflect.ValueOf(v).Elem().FieldByIndex(m.Index).Addr().Interface()
+				v = vt.unsafereflectType().FieldPointer(v, m.Index[0])
 			default:
 				return fmt.Errorf(
 					"%[1]w: Unexpected member: %[2]v (type: %[2]T) of %[3]v (%[3]T)",
@@ -455,7 +464,7 @@ func (ee *exprEvaluator) eval(ctx context.Context) error {
 			m := reflect.ValueOf(
 				ee.popType().pop(&ee.eeValues),
 			).Convert(
-				mapStrAnyType,
+				mapStrAnyType.ReflectType(),
 			).Interface().(map[string]interface{})
 			k, _ := ee.popStr(), ee.popType()
 			v := m[k]

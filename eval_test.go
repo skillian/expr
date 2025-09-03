@@ -12,6 +12,45 @@ import (
 	"github.com/skillian/logging"
 )
 
+func TestEval(t *testing.T) {
+	testCtx := expr.WithFuncCache(context.Background())
+	closeHandler := logging.TestingHandler(
+		logger, t,
+		logging.HandlerFormatter(logging.FormatterFunc(func(e *logging.Event) string {
+			return fmt.Sprintf(e.Msg, e.Args...)
+		})),
+		logging.HandlerLevel(logging.InfoLevel),
+	)
+	defer closeHandler()
+	for i := 0; i < 2; i++ {
+		// run tests twice to test function caching
+		for _, tc := range evalTests {
+			t.Run(fmt.Sprint(tc.e), func(t *testing.T) {
+				vs := expr.NoValues()
+				if len(tc.varVals) > 0 {
+					vs = expr.NewValues(tc.varVals...)
+				}
+				ctx := expr.AddValuesToContext(testCtx, vs)
+				f, err := expr.FuncOfExpr(ctx, tc.e, vs)
+				if err != nil {
+					t.Logf("%v:\n%v", tc.e, f)
+				}
+				handleErr(t, err, tc.err)
+				res, err := f.Call(ctx, vs)
+				handleErr(t, err, tc.err)
+				if !eq(res, tc.expect) {
+					t.Fatalf(
+						"expected:\n\t%[1]v (type: %[1]T)\n"+
+							"but actual value:\n"+
+							"\t%[2]v (type: %[2]T)",
+						tc.expect, res,
+					)
+				}
+			})
+		}
+	}
+}
+
 type evalTest struct {
 	e       expr.Expr
 	varVals []expr.VarValue
@@ -110,45 +149,6 @@ var evalTests = []evalTest{
 	{expr.Eq{expr.Tuple{1, 2}, expr.Tuple{1, 2}}, nil, true, ""},
 
 	// negative tests:
-}
-
-func TestEval(t *testing.T) {
-	testCtx := expr.WithFuncCache(context.Background())
-	closeHandler := logging.TestingHandler(
-		logger, t,
-		logging.HandlerFormatter(logging.FormatterFunc(func(e *logging.Event) string {
-			return fmt.Sprintf(e.Msg, e.Args...)
-		})),
-		logging.HandlerLevel(logging.InfoLevel),
-	)
-	defer closeHandler()
-	for i := 0; i < 2; i++ {
-		// run tests twice to test function caching
-		for _, tc := range evalTests {
-			t.Run(fmt.Sprint(tc.e), func(t *testing.T) {
-				vs := expr.NoValues()
-				if len(tc.varVals) > 0 {
-					vs = expr.NewValues(tc.varVals...)
-				}
-				ctx := expr.AddValuesToContext(testCtx, vs)
-				f, err := expr.FuncOfExpr(ctx, tc.e, vs)
-				if err != nil {
-					t.Logf("%v:\n%v", tc.e, f)
-				}
-				handleErr(t, err, tc.err)
-				res, err := f.Call(ctx, vs)
-				handleErr(t, err, tc.err)
-				if !eq(res, tc.expect) {
-					t.Fatalf(
-						"expected:\n\t%[1]v (type: %[1]T)\n"+
-							"but actual value:\n"+
-							"\t%[2]v (type: %[2]T)",
-						tc.expect, res,
-					)
-				}
-			})
-		}
-	}
 }
 
 func eq(a, b interface{}) bool {

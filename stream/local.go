@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"reflect"
+	"unsafe"
 
 	"github.com/skillian/expr"
+	"github.com/skillian/unsafereflect"
 )
 
 type localStreamer struct {
@@ -17,14 +20,14 @@ type localStreamer struct {
 
 type localFilterer localStreamer
 
-func NewLocalFilterer(ctx context.Context, sr Streamer, e expr.Expr) (Streamer, error) {
+func NewLocalFilterer(ctx context.Context, sr Streamer, e expr.Expr) Streamer {
 	if srcFr, ok := sr.(localFilterer); ok {
 		return localFilterer{
 			source: srcFr.source,
 			e:      expr.And{srcFr.e, e},
-		}, nil
+		}
 	}
-	return localFilterer{sr, e}, nil
+	return localFilterer{sr, e}
 }
 
 func (fr localFilterer) Stream(ctx context.Context) (Stream, error) {
@@ -61,6 +64,10 @@ type localStream struct {
 type localFilter struct {
 	localStream
 	nexter func(*localFilter, context.Context) error
+}
+
+func (f *localFilter) Close(ctx context.Context) error {
+	return closeStream(ctx, f.source)
 }
 
 func (f *localFilter) Next(ctx context.Context) error { return f.nexter(f, ctx) }
@@ -140,8 +147,8 @@ func (f localFilter) Var() expr.Var { return f.source.Var() }
 
 type localMapper localStreamer
 
-func NewLocalMapper(ctx context.Context, sr Streamer, e expr.Expr) (Streamer, error) {
-	return &localMapper{sr, e}, nil
+func NewLocalMapper(ctx context.Context, sr Streamer, e expr.Expr) Streamer {
+	return &localMapper{sr, e}
 }
 
 func (mr *localMapper) Stream(ctx context.Context) (Stream, error) {
@@ -165,6 +172,10 @@ type localMap struct {
 	localStream
 	va     expr.Var
 	nexter func(*localMap, context.Context) error
+}
+
+func (m *localMap) Close(ctx context.Context) error {
+	return closeStream(ctx, m.source)
 }
 
 func (m *localMap) Next(ctx context.Context) error { return m.nexter(m, ctx) }
@@ -236,8 +247,8 @@ type localJoiner struct {
 }
 
 // NewLocalJoiner performs a join operation within the current process.
-func NewLocalJoiner(ctx context.Context, bigger, smaller Streamer, when, then expr.Expr) (Streamer, error) {
-	return &localJoiner{bigger, smaller, when, then}, nil
+func NewLocalJoiner(ctx context.Context, bigger, smaller Streamer, when, then expr.Expr) Streamer {
+	return &localJoiner{bigger, smaller, when, then}
 }
 
 type localJoin struct {
@@ -280,6 +291,23 @@ func (j *localJoiner) Stream(ctx context.Context) (Stream, error) {
 }
 
 func (j localJoiner) Var() expr.Var { return j }
+
+func (j *localJoin) Close(ctx context.Context) error {
+	errs := make([]error, 0, 2)
+	if err := closeStream(ctx, j.bigger); err != nil {
+		errs = append(errs, err)
+	}
+	if err := closeStream(ctx, j.smaller); err != nil {
+		errs = append(errs, err)
+	}
+	switch len(errs) {
+	case 0:
+		return nil
+	case 1:
+		return errs[0]
+	}
+	return errors.Join(errs...)
+}
 
 func (j *localJoin) Next(ctx context.Context) error {
 	return j.nexter(j, ctx)
@@ -448,6 +476,67 @@ func (j *localJoin) String() string {
 	)
 }
 
+type localLimiter struct {
+	source Streamer
+	limit  big.Int
+}
+
+var _ Streamer = (*localLimiter)(nil)
+
+func (lr *localLimiter) Stream(ctx context.Context) (Stream, error) {
+	s, err := lr.source.Stream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &localLimit{
+		source:  s,
+		limiter: lr,
+	}, nil
+}
+
+func (lr *localLimiter) Var() expr.Var { return lr.source.Var() }
+
+type localLimit struct {
+	source  Stream
+	count   big.Int
+	limiter *localLimiter
+}
+
+var _ Stream = (*localLimit)(nil)
+
+var bigInts = func() (ints [2]big.Int) {
+	for i := range ints[:] {
+		ints[i].SetInt64(int64(i))
+	}
+	return
+}()
+
+func (lim *localLimit) Close(ctx context.Context) error {
+	return closeStream(ctx, lim.source)
+}
+
+func (lim *localLimit) Next(ctx context.Context) error {
+	if lim.count.Cmp(&lim.limiter.limit) >= 0 {
+		if err := closeStream(ctx, lim.source); err != nil {
+			return errors.Join(
+				fmt.Errorf(
+					"attempting to close stream "+
+						"after reaching limit: %w",
+					err,
+				),
+				io.EOF,
+			)
+		}
+		return io.EOF
+	}
+	lim.count.Add(&lim.count, &bigInts[1])
+	return lim.source.Next(ctx)
+}
+
+func (lim *localLimit) Var() expr.Var { return lim.source.Var() }
+
+// closeStream attempts to close a stream if the stream implements
+// a Close() or Close(context.Context) method.
 func closeStream(ctx context.Context, s Stream) error {
 	switch s := s.(type) {
 	case io.Closer:
@@ -458,6 +547,8 @@ func closeStream(ctx context.Context, s Stream) error {
 	return nil
 }
 
+// resetStream attempts to reset the stream so that it can be iterated
+// over again.
 func resetStream(ctx context.Context, s Stream) error {
 	switch s := s.(type) {
 	case interface{ Reset() error }:
@@ -468,54 +559,70 @@ func resetStream(ctx context.Context, s Stream) error {
 	return expr.ErrInvalidType
 }
 
-// slice wraps a slice of anything.
 type slice struct {
-	rv reflect.Value
+	t      *unsafereflect.Type
+	start  unsafe.Pointer
+	length int
 }
 
-// FromSlice creates a streamer from a slice of anything.
-func FromSlice(vs interface{}) Streamer {
-	rv := reflect.ValueOf(vs)
-	if rv.Kind() != reflect.Slice {
-		panic(fmt.Sprintf(
-			"%[1]v (type: %[1]T) is not a slice",
-			vs,
-		))
+var empty = &slice{unsafereflect.TypeOf(struct{}{}), nil, 0}
+
+// Empty returns an empty streamer
+func Empty() Streamer { return empty }
+
+// FromSlice creates a stream from a slice of values.  If s is not a
+// slice, then it is wrapped as if it were []interface{}{s}
+func FromSlice(s interface{}) Streamer {
+	t := unsafereflect.TypeOf(s)
+	base := unsafereflect.InterfaceDataOf(unsafe.Pointer(&s)).Data
+	if t.ReflectType().Kind() != reflect.Slice {
+		return &slice{
+			t: unsafereflect.TypeFromReflectType(
+				reflect.SliceOf(t.ReflectType()),
+			),
+			start:  base,
+			length: 1,
+		}
 	}
-	return &slice{rv}
+	length := unsafereflect.Len(s)
+	if length == 0 {
+		return Empty()
+	}
+	return &slice{
+		t:      t,
+		start:  unsafereflect.SliceDataOf(base).Data,
+		length: length,
+	}
 }
 
-var _ interface {
-	Streamer
-} = (*slice)(nil)
+func (sl *slice) Stream(context.Context) (Stream, error) {
+	return &sliceStream{sl, 0}, nil
+}
 
-func (sl *slice) Stream(ctx context.Context) (Stream, error) {
-	return &sliceStream{sl.rv, sl.Var()}, nil
+func (sl *slice) slice() interface{} {
+	return reflect.SliceAt(sl.t.ReflectType().Elem(), sl.start, sl.length).Interface()
 }
 
 func (sl *slice) Var() expr.Var { return sl }
 
 type sliceStream struct {
-	rv reflect.Value
-	va expr.Var
+	slice *slice
+	index int
 }
 
-var _ interface {
-	Stream
-} = (*sliceStream)(nil)
-
 func (ss *sliceStream) Next(ctx context.Context) error {
-	length := ss.rv.Len()
-	if length == 0 {
+	if ss.index >= ss.slice.length {
 		return io.EOF
 	}
 	vs, err := expr.ValuesFromContext(ctx)
 	if err != nil {
 		return err
 	}
-	v := ss.rv.Index(0).Interface()
-	ss.rv = ss.rv.Slice(1, length)
-	return vs.Set(ctx, ss.va, v)
+	ss.index++
+	return vs.Set(ctx, ss.Var(), ss.slice.t.UnsafeFieldValue(
+		ss.slice.slice(),
+		ss.index-1,
+	))
 }
 
-func (ss *sliceStream) Var() expr.Var { return ss.va }
+func (ss *sliceStream) Var() expr.Var { return ss.slice.Var() }

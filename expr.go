@@ -8,10 +8,10 @@ import (
 	"math/bits"
 	"reflect"
 	"strings"
-	"sync"
 
 	"github.com/skillian/ctxutil"
 	"github.com/skillian/logging"
+	"github.com/skillian/unsafereflect"
 )
 
 const (
@@ -25,29 +25,30 @@ const (
 	MoreUnsafe = true
 )
 
-var (
-	logger = logging.GetLogger(PkgName)
-)
-
 // Expr is a basic expression
 type Expr interface{}
 
-var exprType = reflect.TypeOf((*Expr)(nil)).Elem()
+var (
+	exprType = reflect.TypeOf((*Expr)(nil)).Elem()
+	logger   = logging.GetLogger(PkgName)
+)
 
 // Tuple is a finite ordered sequence of expressions.
 type Tuple []Expr
+
+func MakeTuple(length int) Tuple {
+	return make(Tuple, length)
+}
 
 func (t Tuple) Eq(t2 Tuple) bool {
 	if len(t) != len(t2) {
 		return false
 	}
-	var vs eeValues
+	vs := quickSimpleEEValues()
 	for i, x := range t {
 		vs.push(t2[i])
-		et := typeOf(x)
-		et.push(&vs, x)
-		vs.pushType(et)
-		if !et.eq(&vs) {
+		vs.push(x)
+		if !vs.peekType().eq(vs) {
 			return false
 		}
 	}
@@ -69,9 +70,9 @@ func (x Not) Operand() Expr { return x[0] }
 
 func (x Not) String() string { return buildString(x) }
 
-func (x Not) appendString(sb *strings.Builder) {
+func (x Not) writeStringToStringBuilder(sb *strings.Builder) {
 	sb.WriteString("(not ")
-	appendString(sb, x[0])
+	writeStringToStringBuilder(sb, x[0])
 	sb.WriteByte(')')
 }
 
@@ -88,7 +89,7 @@ func (x Eq) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Eq) String() string { return buildString(x) }
 
-func (x Eq) appendString(sb *strings.Builder) { appendBinary(sb, "eq", x) }
+func (x Eq) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "eq", x) }
 
 // Ne checks for inequality (i.e. a != b)
 type Ne [2]Expr
@@ -97,7 +98,7 @@ func (x Ne) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Ne) String() string { return buildString(x) }
 
-func (x Ne) appendString(sb *strings.Builder) { appendBinary(sb, "ne", x) }
+func (x Ne) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "ne", x) }
 
 // Gt checks if the first operand is greater than the second (i.e. a > b)
 type Gt [2]Expr
@@ -106,7 +107,7 @@ func (x Gt) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Gt) String() string { return buildString(x) }
 
-func (x Gt) appendString(sb *strings.Builder) { appendBinary(sb, "gt", x) }
+func (x Gt) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "gt", x) }
 
 // Ge checks if the first operand is greater than or equal to the second
 // (i.e. a >= b)
@@ -116,7 +117,7 @@ func (x Ge) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Ge) String() string { return buildString(x) }
 
-func (x Ge) appendString(sb *strings.Builder) { appendBinary(sb, "ge", x) }
+func (x Ge) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "ge", x) }
 
 // Lt checks if the first operand is greater than the second (i.e. a < b)
 type Lt [2]Expr
@@ -125,7 +126,7 @@ func (x Lt) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Lt) String() string { return buildString(x) }
 
-func (x Lt) appendString(sb *strings.Builder) { appendBinary(sb, "lt", x) }
+func (x Lt) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "lt", x) }
 
 // Le checks if the first operand is less than or equal to the second
 // (i.e. a <= b)
@@ -135,7 +136,7 @@ func (x Le) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Le) String() string { return buildString(x) }
 
-func (x Le) appendString(sb *strings.Builder) { appendBinary(sb, "le", x) }
+func (x Le) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "le", x) }
 
 // And performs a boolean AND operation of its two operands.
 //
@@ -149,7 +150,22 @@ func (x And) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x And) String() string { return buildString(x) }
 
-func (x And) appendString(sb *strings.Builder) { appendBinary(sb, "and", x) }
+func (x And) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "and", x) }
+
+// All creates an expression that checks if es[0] AND es[1] AND es[n]
+func All(es ...Expr) Expr {
+	switch len(es) {
+	case 0:
+		return nil
+	case 1:
+		return es[0]
+	}
+	and := es[0]
+	for _, e := range es[1:] {
+		and = And{and, e}
+	}
+	return and
+}
 
 // Or performs a boolean OR operation of its two operands.
 //
@@ -163,7 +179,22 @@ func (x Or) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Or) String() string { return buildString(x) }
 
-func (x Or) appendString(sb *strings.Builder) { appendBinary(sb, "or", x) }
+func (x Or) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "or", x) }
+
+// Any creates an expression that checks if es[0] OR es[1] OR es[n]
+func Any(es ...Expr) Expr {
+	switch len(es) {
+	case 0:
+		return nil
+	case 1:
+		return es[0]
+	}
+	or := es[0]
+	for _, e := range es[1:] {
+		or = Or{or, e}
+	}
+	return or
+}
 
 // Add performs an arithmetic addition of its two operands (i.e. a + b)
 type Add [2]Expr
@@ -172,7 +203,7 @@ func (x Add) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Add) String() string { return buildString(x) }
 
-func (x Add) appendString(sb *strings.Builder) { appendBinary(sb, "+", x) }
+func (x Add) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "+", x) }
 
 // Sub performs an arithmetic addition of its two operands (i.e. a - b)
 type Sub [2]Expr
@@ -181,7 +212,7 @@ func (x Sub) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Sub) String() string { return buildString(x) }
 
-func (x Sub) appendString(sb *strings.Builder) { appendBinary(sb, "-", x) }
+func (x Sub) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "-", x) }
 
 // Mul performs an arithmetic addition of its two operands (i.e. a * b)
 type Mul [2]Expr
@@ -190,7 +221,7 @@ func (x Mul) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Mul) String() string { return buildString(x) }
 
-func (x Mul) appendString(sb *strings.Builder) { appendBinary(sb, "*", x) }
+func (x Mul) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "*", x) }
 
 // Div performs an arithmetic addition of its two operands (i.e. a /+ b)
 type Div [2]Expr
@@ -199,14 +230,19 @@ func (x Div) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Div) String() string { return buildString(x) }
 
-func (x Div) appendString(sb *strings.Builder) { appendBinary(sb, "/", x) }
+func (x Div) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, "/", x) }
 
 // Mem selects a member of a source expression.
 type Mem [2]Expr
 
-var mems sync.Map // map[reflect.Type][]reflect.StructField
+func ReflectStructFieldsOfType(rt reflect.Type) []reflect.StructField {
+	return unsafereflect.TypeFromReflectType(rt).ReflectStructFields()
+}
 
-func MemOf(e Expr, base, field interface{}) Mem {
+// ReflectStructFieldOf takes a pointer to a struct and a pointer to
+// a field within the struct to get that field's `*reflect.StructField`.
+// This `*reflect.StructField` is cached, so do not mutate it.
+func ReflectStructFieldOf(base, field interface{}) (sf *reflect.StructField) {
 	getPtr := func(v interface{}) (rv reflect.Value, p uintptr) {
 		rv = reflect.ValueOf(v)
 		if !rv.IsValid() {
@@ -224,51 +260,34 @@ func MemOf(e Expr, base, field interface{}) Mem {
 		p = rv.Pointer()
 		return
 	}
-	getStructFields := func(t reflect.Type) *[]reflect.StructField {
-		k := interface{}(t)
-		v, loaded := mems.Load(k)
-		if loaded {
-			return v.(*[]reflect.StructField)
-		}
-		offs := new([]reflect.StructField)
-		*offs = make([]reflect.StructField, 0, t.NumField())
-		for i := 0; i < cap(*offs); i++ {
-			f := t.Field(i)
-			if f.Type.Size() == 0 {
-				continue
-			}
-			*offs = append(*offs, f)
-		}
-		v, loaded = mems.LoadOrStore(k, offs)
-		if loaded {
-			return v.(*[]reflect.StructField)
-		}
-		return offs
-	}
 	bv, bp := getPtr(base)
 	fv, fp := getPtr(field)
 	ft := fv.Elem().Type()
-	foff := fp - bp
-	structFields := *getStructFields(bv.Type().Elem())
+	offset := fp - bp
+	structFields := ReflectStructFieldsOfType(bv.Type().Elem())
 	// TODO: Maybe binary search would be better, but I'm assuming tiny
 	// numbers of fields for now:
 	for i := range structFields {
 		sf := &structFields[i]
-		if sf.Offset == foff && sf.Type == ft {
-			return Mem{e, sf}
+		if sf.Offset == offset && sf.Type == ft {
+			return sf
 		}
 	}
 	panic(fmt.Errorf(
 		"unknown %T field at offset %d in %T",
-		field, foff, base,
+		field, offset, base,
 	))
+}
+
+func MemOf(e Expr, base, field interface{}) Mem {
+	return Mem{e, ReflectStructFieldOf(base, field)}
 }
 
 func (x Mem) Operands() [2]Expr { return ([2]Expr)(x) }
 
 func (x Mem) String() string { return buildString(x) }
 
-func (x Mem) appendString(sb *strings.Builder) { appendBinary(sb, ".", x) }
+func (x Mem) writeStringToStringBuilder(sb *strings.Builder) { appendBinary(sb, ".", x) }
 
 // Var is a placeholder for a runtime-determined value in an expression.
 type Var interface {
@@ -278,6 +297,16 @@ type Var interface {
 	// return itself.
 	Var() Var
 }
+
+type NamedVar interface {
+	Var
+	Name() string
+}
+
+type Ident string
+
+func (n Ident) Var() Var     { return n }
+func (n Ident) Name() string { return string(n) }
 
 // Values is an ordered mapping of Vars to their values.
 type Values interface {
@@ -306,7 +335,7 @@ func ValuesFromContextOK(ctx context.Context) (vs Values, ok bool) {
 }
 
 var errNoValuesInContext = fmt.Errorf(
-	"%w: failed to get values from context",
+	"expr.Values %w in context",
 	ErrNotFound,
 )
 
@@ -333,8 +362,8 @@ func GetOrAddValuesToContext(ctx context.Context) (context.Context, Values) {
 // Values from the context.
 func ValuesContextKey() interface{} { return (*Values)(nil) }
 
-// VarIter is a variable iterator.  Next must be called before Var to retrieve
-// a valid Var.
+// VarIter is a variable iterator.  Next must be called before Var to
+// retrieve a valid Var.
 type VarIter interface {
 	// Next retrieves the next Var from the VarIter.
 	Next(context.Context) error
@@ -353,8 +382,8 @@ type VarValueIter interface {
 // valueList is an implementation of Values that keeps its keys
 // and values in slices that are scanned sequentially.
 type valueList struct {
-	keys []Var
-	vals []interface{}
+	varValues []VarValue
+	nextIndex int
 }
 
 var _ interface {
@@ -370,15 +399,15 @@ type VarValue struct {
 // NewValues creates Values from a sequence of Vars and their values.
 func NewValues(ps ...VarValue) Values {
 	_, capacity := minMaxInt(1<<bits.Len(uint(len(ps))), 4)
-	vs := &valueList{
-		keys: make([]Var, len(ps), capacity),
-		vals: make([]interface{}, len(ps), capacity),
-	}
-	for i, p := range ps {
-		vs.keys[i] = p.Var
-		vs.vals[i] = p.Value
-	}
-	return vs
+	ps2 := make([]VarValue, len(ps), capacity)
+	copy(ps2, ps)
+	return ValuesOfVarValues(ps2)
+}
+
+// ValuesOfVarValues treats a slice of VarValues as a Values
+// implementation.
+func ValuesOfVarValues(varValues []VarValue) Values {
+	return &valueList{varValues: varValues}
 }
 
 // ErrNotFound indicates something wasn't found; it should be wrapped
@@ -386,23 +415,28 @@ func NewValues(ps ...VarValue) Values {
 var ErrNotFound = errors.New("not found")
 
 func (vs *valueList) Get(ctx context.Context, v Var) (interface{}, error) {
-	for i, k := range vs.keys {
-		if k == v {
-			return vs.vals[i], nil
+	for i, varValues := range [][]VarValue{
+		vs.varValues[vs.nextIndex:],
+		vs.varValues[:vs.nextIndex],
+	} {
+		for j := range varValues {
+			if varValues[j].Var == v {
+				vs.nextIndex = ((1 - i) * vs.nextIndex) + j
+				return varValues[j].Value, nil
+			}
 		}
 	}
 	return nil, ErrNotFound
 }
 
 func (vs *valueList) Set(ctx context.Context, v Var, x interface{}) error {
-	for i, k := range vs.keys {
-		if k == v {
-			vs.vals[i] = x
+	for i := len(vs.varValues) - 1; i >= 0; i-- {
+		if vs.varValues[i].Var == v {
+			vs.varValues[i].Value = x
 			return nil
 		}
 	}
-	vs.keys = append(vs.keys, v)
-	vs.vals = append(vs.vals, x)
+	vs.varValues = append(vs.varValues, VarValue{v, x})
 	return nil
 }
 
@@ -414,7 +448,7 @@ type valueListIter struct {
 func (vs *valueList) Vars() VarIter { return &valueListIter{vs, 0} }
 
 func (vli *valueListIter) Next(context.Context) error {
-	if vli.i >= len(vli.vs.keys) {
+	if vli.i >= len(vli.vs.varValues) {
 		return io.EOF
 	}
 	vli.i++
@@ -426,15 +460,13 @@ func (vli *valueListIter) Reset(context.Context) error {
 	return nil
 }
 
+// Var is not meant to make this type implement the Var interface.
 func (vli *valueListIter) Var() Var {
-	return vli.vs.keys[vli.i-1]
+	return vli.vs.varValues[vli.i-1].Var
 }
 
 func (vli *valueListIter) VarValue(context.Context) VarValue {
-	return VarValue{
-		Var:   vli.vs.keys[vli.i-1],
-		Value: vli.vs.vals[vli.i-1],
-	}
+	return vli.vs.varValues[vli.i-1]
 }
 
 type noValues struct{}
@@ -484,7 +516,7 @@ func EachVarValue(ctx context.Context, vs Values, f func(Var, interface{}) error
 func MakeVarValueSlice(ctx context.Context, vs Values) ([]VarValue, error) {
 	const arbitraryCapacity = 8
 	length := arbitraryCapacity
-	if vsLen, ok := tryLenOK(vs); ok {
+	if vsLen, err := tryLen(vs, 1); err == nil {
 		length = vsLen
 	}
 	vvs := make([]VarValue, length)
@@ -502,84 +534,56 @@ func MakeVarValueSlice(ctx context.Context, vs Values) ([]VarValue, error) {
 	return vvs, nil
 }
 
-// tryLenOK and tryLenErr attempt to get the length of _something_.
-// tryLenOK doesn't waste resources building an error if the value
-// doesn't have a concept of length.  tryLenErr will report an error
-// message if the value doesn't have a length.
-var tryLenOK, _ = func() (func(v interface{}) (int, bool), func(v interface{}) (int, error)) {
-	type tryLenErr int
-	const (
-		ok tryLenErr = iota
-		lenErr
-		nilPtr
-		badType
-		tooDeep
-	)
-	var tryLenImpl func(v interface{}, depth int) (int, tryLenErr, error)
-	tryLenImpl = func(v interface{}, depth int) (int, tryLenErr, error) {
-		switch v := v.(type) {
-		case interface{ Len() int }:
-			return v.Len(), ok, nil
-		case interface{ Len() (int, error) }:
-			n, err := v.Len()
-			return n, lenErr, err
-		default:
-			rv := reflect.ValueOf(v)
-			if !rv.IsValid() {
-				return 0, nilPtr, nil
-			}
-			switch rv.Kind() {
-			case reflect.Ptr:
-				if depth > 0 {
-					return 0, tooDeep, nil
-				}
-				if rv.IsNil() {
-					return 0, nilPtr, nil
-				}
-				rv = rv.Elem()
-				if !rv.CanInterface() {
-					return 0, badType, nil
-				}
-				return tryLenImpl(rv.Interface(), depth+1)
-			case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
-				return rv.Len(), ok, nil
-			}
-			return 0, badType, nil
-		}
+var (
+	errNilPtr         = errors.New("pointer is nil")
+	errInvalidValue   = errors.New("value is invalid")
+	errRecursionLimit = errors.New("max recursion limit reached")
+)
+
+// tryLen attempts to get the length of _something_.
+func tryLen(v interface{}, maxPtrDepth int) (length int, err error) {
+	if maxPtrDepth < 0 {
+		return 0, errRecursionLimit
 	}
-	return func(v interface{}) (int, bool) {
-			length, tryErr, _ := tryLenImpl(v, 0)
-			if tryErr != ok {
-				return 0, false
-			}
-			return length, true
-		}, func(v interface{}) (int, error) {
-			length, tryErr, err := tryLenImpl(v, 0)
-			if err != nil {
-				return 0, err
-			}
-			switch tryErr {
-			case ok:
-				return length, nil
-			case lenErr:
-				return 0, err
-			case nilPtr:
-				return 0, fmt.Errorf(
-					"%w: cannot get length of nil pointer",
-					ErrInvalidType,
-				)
-			case badType:
-				return 0, fmt.Errorf("%w: %T", ErrInvalidType, v)
-			case tooDeep:
-				return 0, fmt.Errorf(
-					"%w: cannot get length of pointer to "+
-						"pointer: %[2]v (type: %[2]T)",
-					ErrInvalidType, v,
-				)
-			}
-			panic(fmt.Errorf("unhandled switch case: %v", tryErr))
+	switch v := v.(type) {
+	case interface{ Len() int }:
+		return v.Len(), nil
+	case interface{ Len() int64 }:
+		return int(v.Len()), nil
+	case interface{ Len() int32 }:
+		return int(v.Len()), nil
+	case interface{ Len() int16 }:
+		return int(v.Len()), nil
+	case interface{ Len() int8 }:
+		return int(v.Len()), nil
+	case interface{ Len() uint64 }:
+		return int(v.Len()), nil
+	case interface{ Len() uint32 }:
+		return int(v.Len()), nil
+	case interface{ Len() uint16 }:
+		return int(v.Len()), nil
+	case interface{ Len() uint8 }:
+		return int(v.Len()), nil
+	}
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return 0, errNilPtr
+	}
+	switch rv.Kind() {
+	case reflect.Ptr:
+		if rv.IsNil() {
+			return 0, errNilPtr
 		}
-}()
+		rv = rv.Elem()
+		if !rv.CanInterface() {
+			return 0, errInvalidValue
+		}
+		return tryLen(rv.Interface(), maxPtrDepth-1)
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return rv.Len(), nil
+	}
+	return 0, errInvalidValue
+}
 
 // VarValueIterOf creates a VarValueIter from the values.  If the Values'
 // Vars function already returns a VarValueIter implementation, that
@@ -602,14 +606,14 @@ func (vvi varValueIter) VarValue(ctx context.Context) VarValue {
 
 func buildString(x interface{}) string {
 	sb := strings.Builder{}
-	appendString(&sb, x)
+	writeStringToStringBuilder(&sb, x)
 	return sb.String()
 }
 
-func appendString(sb *strings.Builder, x interface{}) {
+func writeStringToStringBuilder(sb *strings.Builder, x interface{}) {
 	switch x := x.(type) {
-	case interface{ appendString(sb *strings.Builder) }:
-		x.appendString(sb)
+	case interface{ writeStringToStringBuilder(sb *strings.Builder) }:
+		x.writeStringToStringBuilder(sb)
 	default:
 		sb.WriteString(fmt.Sprint(x))
 	}
@@ -620,9 +624,9 @@ func appendBinary(sb *strings.Builder, op string, b Binary) {
 	sb.WriteByte('(')
 	sb.WriteString(op)
 	sb.WriteByte(' ')
-	appendString(sb, ops[0])
+	writeStringToStringBuilder(sb, ops[0])
 	sb.WriteByte(' ')
-	appendString(sb, ops[1])
+	writeStringToStringBuilder(sb, ops[1])
 	sb.WriteByte(')')
 }
 
@@ -687,7 +691,17 @@ func (f VisitFunc) Visit(ctx context.Context, e Expr) (Visitor, error) {
 	return f(ctx, e)
 }
 
-func Walk(ctx context.Context, e Expr, v Visitor, options ...WalkOption) error {
+var errNilExpr = errors.New("nil expression")
+
+func Walk(ctx context.Context, e Expr, v Visitor, options ...WalkOption) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("expr.Walk: %v: %w", e, err)
+		}
+	}()
+	if e == nil {
+		return errNilExpr
+	}
 	var cfg walkConfig
 	for _, opt := range options {
 		opt(&cfg)

@@ -8,28 +8,31 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/skillian/unsafereflect"
 )
 
 // RegisterIntType registers an int-kind type
 func RegisterIntType(v interface{}) {
-	rt := reflect.TypeOf(v)
-	eeTypes.LoadOrStore(rt, eeIntKindType{eeKindType{rt: rt}})
+	urt := unsafereflect.TypeOf(v)
+	eeTypes.LoadOrStore(urt, eeIntKindType{eeKindType{urt: urt}})
 }
 
 // RegisterInt64Type registers an int64-kind type
 func RegisterInt64Type(v interface{}) {
-	rt := reflect.TypeOf(v)
-	eeTypes.LoadOrStore(rt, eeInt64KindType{eeKindType{rt: rt}})
+	urt := unsafereflect.TypeOf(v)
+	eeTypes.LoadOrStore(urt, eeInt64KindType{eeKindType{urt: urt}})
 }
 
 // RegisterInt64Type registers an int64-kind type
 func RegisterStringType(v interface{}) {
-	rt := reflect.TypeOf(v)
-	eeTypes.LoadOrStore(rt, eeStringKindType{eeKindType{rt: rt}})
+	urt := unsafereflect.TypeOf(v)
+	eeTypes.LoadOrStore(urt, eeStringKindType{eeKindType{urt: urt}})
 }
 
 func init() {
 	RegisterInt64Type(time.Duration(0))
+	RegisterStringType(Ident(""))
 }
 
 // eeType is the definition of a type that is used by the
@@ -67,8 +70,8 @@ type eeType interface {
 	// ptr so, it's one escape not n escapes.
 	pushElem(vs *eeValues, ptr interface{}) int
 
-	// reflectType gets the reflect.Type
-	reflectType() reflect.Type
+	// unsafereflectType gets the wrapped *unsafereflect.Type
+	unsafereflectType() *unsafereflect.Type
 }
 
 // typeOf is like reflect.ValueOf to get the eeType
@@ -78,8 +81,13 @@ func typeOf(v interface{}) eeType {
 
 // getType is like reflect.TypeOf to get the eeType
 func getType(rt reflect.Type) eeType {
+	return getTypeFromUnsafeReflectType(unsafereflect.TypeFromReflectType(rt))
+}
+
+// getType is like reflect.TypeOf to get the eeType
+func getTypeFromUnsafeReflectType(urt *unsafereflect.Type) eeType {
 	initMethods := func(et *eeReflectType) {
-		rt := et.reflectType()
+		rt := et.unsafereflectType().ReflectType()
 		numMethods := rt.NumMethod()
 		et.fns = make([]eeReflectFunc, numMethods)
 		// preallocate single slice for all fn parameters:
@@ -125,31 +133,30 @@ func getType(rt reflect.Type) eeType {
 		}
 	}
 	initStruct := func(et *eeReflectType) {
-		et.numFields = et.reflectType().NumField()
+		et.numFields = et.unsafereflectType().ReflectType().NumField()
 		initMethods(et)
 	}
-	createType := func(rt reflect.Type) (t eeType) {
+	createType := func(urt *unsafereflect.Type) (t eeType) {
+		rt := urt.ReflectType()
 		switch rt.Kind() {
 		case reflect.Bool, reflect.Float64, reflect.Int, reflect.Int64, reflect.Map, reflect.String:
 			panic("bool, float64, int, int64, map, and string kind types must be registered")
 		case reflect.Pointer:
-			if rt.ConvertibleTo(bigRatType) {
-				return eeRatKindType{rt: rt}
+			if rt.ConvertibleTo(bigRatType.ReflectType()) {
+				return eeRatKindType{urt: urt}
 			}
-			ptrRt := rt
-			rt = rt.Elem()
 			pt := &eePtrType{
 				eeReflectType: eeReflectType{
-					rt: ptrRt,
+					urt: urt,
 				},
-				derefType: getType(rt),
+				derefType: getType(rt.Elem()),
 			}
 			pt.eeReflectType.eeTypeInit.fn = func() {
 				initMethods(&pt.eeReflectType)
 			}
 			return pt
 		default:
-			et := &eeReflectType{rt: rt}
+			et := &eeReflectType{urt: urt}
 			switch rt.Kind() {
 			case reflect.Struct:
 				et.eeTypeInit.fn = func() {
@@ -163,12 +170,12 @@ func getType(rt reflect.Type) eeType {
 			return et
 		}
 	}
-	k := interface{}(rt)
+	k := interface{}(urt)
 	v, ok := eeTypes.Load(k)
 	if ok {
 		return v.(eeType)
 	}
-	et := createType(rt)
+	et := createType(urt)
 	v, ok = eeTypes.LoadOrStore(k, et)
 	if ok {
 		et = v.(eeType)
@@ -224,16 +231,16 @@ var (
 		return
 	}()
 
-	anyType       = reflect.TypeOf((*interface{})(nil)).Elem()
-	bigRatType    = reflect.TypeOf((*big.Rat)(nil))
-	boolType      = reflect.TypeOf(false)
-	errorType     = reflect.TypeOf((*error)(nil)).Elem()
-	float64Type   = reflect.TypeOf(float64(0))
-	intType       = reflect.TypeOf(int(0))
-	int64Type     = reflect.TypeOf(int64(0))
-	stringType    = reflect.TypeOf("")
-	mapStrAnyType = reflect.TypeOf(map[string]interface{}(nil))
-	tupleType     = reflect.TypeOf(Tuple(nil))
+	anyType       = unsafereflect.TypeFromReflectType(reflect.TypeOf((*interface{})(nil)).Elem())
+	bigRatType    = unsafereflect.TypeFromReflectType(reflect.TypeOf((*big.Rat)(nil)))
+	boolType      = unsafereflect.TypeFromReflectType(reflect.TypeOf(false))
+	errorType     = unsafereflect.TypeFromReflectType(reflect.TypeOf((*error)(nil)).Elem())
+	float64Type   = unsafereflect.TypeFromReflectType(reflect.TypeOf(float64(0)))
+	intType       = unsafereflect.TypeFromReflectType(reflect.TypeOf(int(0)))
+	int64Type     = unsafereflect.TypeFromReflectType(reflect.TypeOf(int64(0)))
+	stringType    = unsafereflect.TypeFromReflectType(reflect.TypeOf(""))
+	mapStrAnyType = unsafereflect.TypeFromReflectType(reflect.TypeOf(map[string]interface{}(nil)))
+	//tupleType     = unsafereflect.TypeFromReflectType(reflect.TypeOf(Tuple(nil)))
 
 	defaultTypeInit = func() (ti eeTypeInit) {
 		ti.fn = func() {}
@@ -241,20 +248,20 @@ var (
 	}
 
 	eeAnyType   eeType = eeAnyKindType{}
-	eeBoolType  eeType = eeBoolKindType{eeKindType{rt: boolType}}
+	eeBoolType  eeType = eeBoolKindType{eeKindType{urt: boolType}}
 	eeErrorType eeType = &eeReflectType{
-		rt:         errorType,
+		urt:        errorType,
 		eeTypeInit: defaultTypeInit(),
 	}
-	eeFloat64Type eeType = eeFloatKindType{eeKindType{rt: float64Type}}
-	eeIntType     eeType = eeIntKindType{eeKindType{rt: intType}}
-	eeInt64Type   eeType = eeInt64KindType{eeKindType{rt: int64Type}}
-	eeRatType     eeType = eeRatKindType{rt: bigRatType}
-	eeStringType  eeType = eeStringKindType{eeKindType{rt: stringType}}
+	eeFloat64Type eeType = eeFloatKindType{eeKindType{urt: float64Type}}
+	eeIntType     eeType = eeIntKindType{eeKindType{urt: intType}}
+	eeInt64Type   eeType = eeInt64KindType{eeKindType{urt: int64Type}}
+	eeRatType     eeType = eeRatKindType{urt: bigRatType}
+	eeStringType  eeType = eeStringKindType{eeKindType{urt: stringType}}
 
 	eeMapStrAnyType eeType = &eeMapKindType{
 		eeReflectType: eeReflectType{
-			rt:         mapStrAnyType,
+			urt:        mapStrAnyType,
 			eeTypeInit: defaultTypeInit(),
 		},
 		keyType: eeStringType.(eeStringKindType),
@@ -271,7 +278,7 @@ var (
 			eeStringType,
 			eeMapStrAnyType,
 		} {
-			m.Store(et.reflectType(), et)
+			m.Store(et.unsafereflectType(), et)
 		}
 		return
 	}()
@@ -308,7 +315,7 @@ func (eeAnyKindType) push(vs *eeValues, v interface{}) int { return vs.pushAny(v
 func (eeAnyKindType) pushElem(vs *eeValues, ptr interface{}) int {
 	return vs.pushAny(*(ptr.(*interface{})))
 }
-func (eeAnyKindType) reflectType() reflect.Type { return anyType }
+func (eeAnyKindType) unsafereflectType() *unsafereflect.Type { return anyType }
 
 type eeReflectFunc struct {
 	// inOutTypes holds input parameter types in [0:len(inOutTypes)]
@@ -342,7 +349,7 @@ func (et *eePtrType) checkType(e Expr, t2 eeType) (eeType, error) {
 type eeReflectType struct {
 	eeAnyKindType
 	eeTypeInit
-	rt        reflect.Type
+	urt       *unsafereflect.Type
 	numFields int
 	fns       []eeReflectFunc
 
@@ -364,14 +371,14 @@ func eeReflectTypeFn(et *eeReflectType, arg interface{}, anyFn, boolFn, floatFn,
 	if et == nil {
 		panic("et is nil")
 	}
-	rt := et.reflectType()
+	rt := et.unsafereflectType().ReflectType()
 	if rt == nil {
 		panic(fmt.Errorf(
 			"%#[1]v (@%[1]p) reflectType is nil",
 			et,
 		))
 	}
-	switch et.reflectType().Kind() {
+	switch rt.Kind() {
 	case reflect.Bool:
 		boolFn(arg)
 	case reflect.Float32, reflect.Float64:
@@ -379,7 +386,7 @@ func eeReflectTypeFn(et *eeReflectType, arg interface{}, anyFn, boolFn, floatFn,
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		intFn(arg)
 	case reflect.Pointer:
-		if et.reflectType().ConvertibleTo(bigRatType) {
+		if rt.ConvertibleTo(bigRatType.ReflectType()) {
 			ratFn(arg)
 		}
 	case reflect.String:
@@ -452,13 +459,13 @@ func (et *eeReflectType) eq(vs *eeValues) bool {
 
 func (et *eeReflectType) get(vs *eeValues, i int) (res interface{}) {
 	type getStateType struct {
-		rt  reflect.Type
+		urt *unsafereflect.Type
 		res *interface{}
 		vs  *eeValues
 		i   int
 	}
 	eeReflectTypeFn(
-		et, getStateType{et.reflectType(), &res, vs, i},
+		et, getStateType{et.unsafereflectType(), &res, vs, i},
 		func(getState interface{}) {
 			args := getState.(getStateType)
 			*args.res = args.vs.anys[args.i]
@@ -466,47 +473,47 @@ func (et *eeReflectType) get(vs *eeValues, i int) (res interface{}) {
 		func(getState interface{}) {
 			args := getState.(getStateType)
 			v := args.vs.nums[args.i] != 0
-			if args.rt == boolType {
+			if args.urt == boolType {
 				*args.res = v
 				return
 			}
-			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.urt.ReflectType()).Interface()
 		},
 		func(getState interface{}) {
 			args := getState.(getStateType)
 			v := (*args.vs.floats())[args.i]
-			if args.rt == float64Type {
+			if args.urt == float64Type {
 				*args.res = v
 				return
 			}
-			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.urt.ReflectType()).Interface()
 		},
 		func(getState interface{}) {
 			args := getState.(getStateType)
 			v := args.vs.nums[args.i]
-			if args.rt == int64Type {
+			if args.urt == int64Type {
 				*args.res = v
 				return
 			}
-			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.urt.ReflectType()).Interface()
 		},
 		func(getState interface{}) {
 			args := getState.(getStateType)
 			v := args.vs.anys[args.i]
-			if args.rt == reflect.TypeOf(v) {
+			if args.urt == unsafereflect.TypeOf(v) {
 				*args.res = v
 				return
 			}
-			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.urt.ReflectType()).Interface()
 		},
 		func(getState interface{}) {
 			args := getState.(getStateType)
 			v := args.vs.strs[args.i]
-			if args.rt == stringType {
+			if args.urt == stringType {
 				*args.res = v
 				return
 			}
-			*args.res = reflect.ValueOf(v).Convert(args.rt).Interface()
+			*args.res = reflect.ValueOf(v).Convert(args.urt.ReflectType()).Interface()
 		},
 	)
 	return
@@ -616,22 +623,23 @@ func (et *eeReflectType) pushElem(vs *eeValues, ptr interface{}) (i int) {
 	return
 }
 
-func (et *eeReflectType) reflectType() reflect.Type { return et.rt }
+func (et *eeReflectType) unsafereflectType() *unsafereflect.Type { return et.urt }
 
 func (et *eeReflectType) sub(vs *eeValues) { et.call(et.subOrd, vs) }
 
-type eeKindType struct{ rt reflect.Type }
+type eeKindType struct{ urt *unsafereflect.Type }
 
 func (et eeKindType) fixType(v *interface{}) {
 	rv := reflect.ValueOf(*v)
-	rt := et.reflectType()
+	urt := et.unsafereflectType()
+	rt := urt.ReflectType()
 	if rt == rv.Type() {
 		return
 	}
 	*v = rv.Convert(rt).Interface()
 }
 
-func (et eeKindType) reflectType() reflect.Type { return et.rt }
+func (et eeKindType) unsafereflectType() *unsafereflect.Type { return et.urt }
 
 type eeBoolKindType struct{ eeKindType }
 
@@ -694,7 +702,7 @@ func (et eeBoolKindType) pushElem(vs *eeValues, ptr interface{}) int {
 	return vs.pushBool(reflect.ValueOf(ptr).Elem().Bool())
 }
 
-func (et eeBoolKindType) reflectType() reflect.Type { return et.rt }
+func (et eeBoolKindType) unsafereflectType() *unsafereflect.Type { return et.urt }
 
 type eeIntKindType struct{ eeKindType }
 
@@ -940,7 +948,7 @@ func (et eeFloatKindType) pushElem(vs *eeValues, ptr interface{}) int {
 	return vs.pushFloat(reflect.ValueOf(ptr).Elem().Float())
 }
 
-func (et eeFloatKindType) reflectType() reflect.Type { return et.rt }
+func (et eeFloatKindType) unsafereflectType() *unsafereflect.Type { return et.urt }
 
 func (et eeFloatKindType) sub(vs *eeValues) {
 	a, _ := vs.popFloat(), vs.popType()
@@ -948,7 +956,7 @@ func (et eeFloatKindType) sub(vs *eeValues) {
 	vs.pushFloat(a - b)
 }
 
-type eeRatKindType struct{ rt reflect.Type }
+type eeRatKindType struct{ urt *unsafereflect.Type }
 
 func (et eeRatKindType) add(vs *eeValues) {
 	a, _ := vs.popRat(), vs.popType()
@@ -1017,29 +1025,29 @@ func (et eeRatKindType) mul(vs *eeValues) {
 
 func (et eeRatKindType) pop(vs *eeValues) interface{} {
 	v := vs.popRat()
-	if et.rt == bigRatType {
+	if et.urt == bigRatType {
 		return v
 	}
-	rv := reflect.New(et.rt.Elem())
+	rv := reflect.New(et.urt.ReflectType())
 	rv.Set(reflect.ValueOf(v))
 	return rv.Interface()
 }
 
 func (et eeRatKindType) push(vs *eeValues, v interface{}) int {
-	if et.reflectType() == bigRatType {
+	if et.unsafereflectType() == bigRatType {
 		return vs.pushRat(v.(*big.Rat))
 	}
-	return vs.pushRat(reflect.ValueOf(v).Convert(bigRatType).Interface().(*big.Rat))
+	return vs.pushRat(reflect.ValueOf(v).Convert(bigRatType.ReflectType()).Interface().(*big.Rat))
 }
 
 func (et eeRatKindType) pushElem(vs *eeValues, ptr interface{}) int {
-	if et.reflectType() == bigRatType {
+	if et.unsafereflectType() == bigRatType {
 		return vs.pushRat(*(ptr.(**big.Rat)))
 	}
-	return vs.pushRat(reflect.ValueOf(ptr).Elem().Convert(bigRatType).Interface().(*big.Rat))
+	return vs.pushRat(reflect.ValueOf(ptr).Elem().Convert(bigRatType.ReflectType()).Interface().(*big.Rat))
 }
 
-func (et eeRatKindType) reflectType() reflect.Type { return et.rt }
+func (et eeRatKindType) unsafereflectType() *unsafereflect.Type { return et.urt }
 
 func (et eeRatKindType) sub(vs *eeValues) {
 	a, _ := vs.popRat(), vs.popType()
@@ -1122,7 +1130,7 @@ func (et eeStringKindType) pushElem(vs *eeValues, ptr interface{}) int {
 	}
 	return vs.pushStr(reflect.ValueOf(ptr).Elem().String())
 }
-func (et eeStringKindType) reflectType() reflect.Type { return et.rt }
+func (et eeStringKindType) unsafereflectType() *unsafereflect.Type { return et.urt }
 
 type eeMapKindType struct {
 	eeReflectType
@@ -1165,7 +1173,6 @@ func (et *eeMapKindType) setMem(vs *eeValues) {
 
 type eeSliceKindType struct {
 	eeAnyKindType
-	rt reflect.Type
 	et eeType
 }
 
