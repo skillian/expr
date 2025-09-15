@@ -11,6 +11,11 @@ import (
 	"github.com/skillian/expr"
 )
 
+var (
+	// Skip indicates that a value in a stream should be skipped
+	Skip error = errors.New("skip")
+)
+
 // Streamer is a source from which streams of values can be created.
 // Stream may be called and the returned Stream object can be used
 // concurrently.
